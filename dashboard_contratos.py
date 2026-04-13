@@ -589,7 +589,7 @@ with tab3:
         
         c1, c2 = st.columns(2)
         with c1:
-            # ✅ FIX 2: Usar nombres normalizados ('estado' en minúscula)
+            # Usar nombres normalizados ('estado' en minúscula)
             if 'estado' in df_bg.columns:
                 bg_counts = df_bg['estado'].value_counts().reset_index()
                 bg_counts.columns = ['Estado', 'Cantidad']
@@ -623,17 +623,22 @@ with tab3:
         
         # Tabla de alertas BG
         st.markdown("#### ⚠️ Contratos que Requieren BG pero Tienen Estado Crítico")
-        # ✅ FIX 2: Merge con nombres normalizados ('cw', 'estado') + filtro de CW válidos
+        
+        # Merge seguro con validación de columnas
         if 'cw' in df_bg.columns and 'contrato_ariba' in df.columns:
-            # Filtrar solo CWs válidos (formato CW+numeros) para evitar "Sin Contrato Asociado"
+            # Filtrar solo CWs válidos (formato CW+numeros)
             mask_valid_cw = df_bg['cw'].astype(str).str.match(r'CW\d+', na=False)
             df_bg_valid = df_bg[mask_valid_cw].copy()
             
             if not df_bg_valid.empty and 'estado' in df_bg_valid.columns:
-                df_merge = df.merge(df_bg_valid[['cw', 'estado', 'venc.', 'monto']], 
-                                   left_on='contrato_ariba', right_on='cw', how='inner')
+                df_merge = df.merge(
+                    df_bg_valid[['cw', 'estado', 'venc.', 'monto']], 
+                    left_on='contrato_ariba', 
+                    right_on='cw', 
+                    how='inner'
+                )
                 
-                # ✅ FIX 1: Buscar columna BG por patrón en df_merge también
+                # Buscar columna BG por patrón en df_merge
                 col_bg_merge = next((c for c in df_merge.columns if 'boleta' in c and 'ariba' in c), None)
                 if col_bg_merge:
                     mask_bg_merge = df_merge[col_bg_merge].astype(str).str.lower().str.contains('sí|si|yes', na=False)
@@ -644,14 +649,21 @@ with tab3:
                     (df_merge['estado'].str.upper().str.contains('VENCIDA|ENTREGADA', na=False)) & 
                     mask_bg_merge
                 ]
+                
                 if not criticas.empty:
-                    st.dataframe(criticas[['contrato_ariba', 'proveedor', 'estado', 'venc.', 'monto']], use_container_width=True)
+                    st.dataframe(
+                        criticas[['contrato_ariba', 'proveedor', 'estado', 'venc.', 'monto']], 
+                        use_container_width=True
+                    )
                     st.warning(f"⚠️ {len(criticas)} contratos con BG requerida pero en estado crítico")
                 else:
                     st.success("✅ Todos los contratos que requieren BG están al día.")
+            else:
+                st.info("ℹ️ No hay datos válidos de BG para cruzar con contratos.")
+        else:
+            st.info("ℹ️ Columnas necesarias para el cruce no encontradas en los datos.")
     else:
         st.info("ℹ️ No se encontró la hoja 'BG' en el archivo. Agrega esta sheet para análisis de garantías.")
-
 # ---------- TAB 4: EXPLORADOR (TU UI) ----------
 with tab4:
     st.markdown("### 🔍 Explorador de Datos")
