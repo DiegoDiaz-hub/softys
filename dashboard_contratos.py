@@ -304,14 +304,24 @@ def crear_timeline_vencimientos(df: pd.DataFrame) -> go.Figure:
     fig.update_layout(xaxis_title="Mes", yaxis_title="Contratos")
     return fig
 
+# ✅ FUNCIÓN CORREGIDA: ROBUSTA PARA COLUMNAS OPCIONALES
 def crear_tabla_alertas(df: pd.DataFrame) -> pd.DataFrame:
-    """Genera tabla de alertas para acción inmediata."""
+    """Genera tabla de alertas para acción inmediata (versión robusta)."""
     alertas = []
     
-    # Contratos vencidos o por vencer con garantía activa
+    # Verificar si la columna de Boleta de Garantía existe
+    col_bg = 'aplica_boleta_de_garantía_ariba'
+    if col_bg in df.columns:
+        # Manejar valores nulos y variantes de "Sí"
+        mask_bg = df[col_bg].astype(str).str.lower().str.contains('sí|si|yes', na=False)
+    else:
+        # Si no existe la columna, crear máscara de False
+        mask_bg = pd.Series([False] * len(df), index=df.index)
+    
+    # Filtrar contratos en riesgo que requieren BG
     mask = (
         (df['riesgo_spot'].isin(['ALTO 🔴', 'MEDIO 🟡'])) & 
-        (df.get('aplica_boleta_de_garantía_ariba', '').str.lower() == 'sí')
+        mask_bg
     )
     
     for _, row in df[mask].iterrows():
@@ -592,7 +602,7 @@ with tab3:
                                left_on='contrato_ariba', right_on='CW', how='inner')
             criticas = df_merge[
                 (df_merge['Estado'].isin(['VENCIDA', 'ENTREGADA'])) & 
-                (df_merge['aplica_boleta_de_garantía_ariba'].str.lower() == 'sí')
+                (df_merge['aplica_boleta_de_garantía_ariba'].str.lower().str.contains('sí|si|yes', na=False))
             ]
             if not criticas.empty:
                 st.dataframe(criticas[['contrato_ariba', 'proveedor', 'Estado', 'VENC.', 'MONTO']], use_container_width=True)
