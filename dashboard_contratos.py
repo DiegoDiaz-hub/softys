@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -262,8 +261,9 @@ def crear_grafico_estado_contratos(df: pd.DataFrame) -> go.Figure:
     fig.update_traces(textinfo='percent+label')
     return fig
 
+# ✅ FUNCIÓN CORREGIDA: JSON-SAFE PARA STREAMLIT CLOUD
 def crear_timeline_vencimientos(df: pd.DataFrame) -> go.Figure:
-    """Timeline de vencimientos próximos."""
+    """Timeline de vencimientos próximos (versión JSON-safe)."""
     if 'dias_para_vencimiento' not in df.columns or df.empty:
         return None
     
@@ -271,22 +271,38 @@ def crear_timeline_vencimientos(df: pd.DataFrame) -> go.Figure:
     if df_filtro.empty:
         return None
     
+    # Determinar columna de fecha de término
     col_termino = 'fecha_término_contrato' if 'fecha_término_contrato' in df_filtro.columns else 'fecha_termino_contrato'
-    if col_termino in df_filtro.columns:
-        df_filtro['fecha_venc'] = pd.to_datetime(df_filtro[col_termino])
-        df_agrupado = df_filtro.groupby(df_filtro['fecha_venc'].dt.to_period('M')).size().reset_index()
-        df_agrupado.columns = ['Mes', 'Cantidad']
-        
-        fig = px.bar(
-            df_agrupado,
-            x='Mes',
-            y='Cantidad',
-            title="📅 Vencimientos Próximos (90 días)",
-            color='Cantidad',
-            color_continuous_scale='YlOrRd'
-        )
-        return fig
-    return None
+    
+    if col_termino not in df_filtro.columns:
+        return None
+    
+    # Asegurar que sea datetime y filtrar NaT
+    df_filtro[col_termino] = pd.to_datetime(df_filtro[col_termino], errors='coerce')
+    df_filtro = df_filtro.dropna(subset=[col_termino])
+    
+    if df_filtro.empty:
+        return None
+    
+    # ✅ CLAVE: convertir Period a string para JSON
+    df_filtro['mes_venc'] = df_filtro[col_termino].dt.to_period('M').astype(str)
+    
+    # Agrupar por mes
+    df_agrupado = df_filtro.groupby('mes_venc').size().reset_index(name='Cantidad')
+    
+    if df_agrupado.empty:
+        return None
+    
+    fig = px.bar(
+        df_agrupado,
+        x='mes_venc',
+        y='Cantidad',
+        title="📅 Vencimientos Próximos (90 días)",
+        color='Cantidad',
+        color_continuous_scale='YlOrRd'
+    )
+    fig.update_layout(xaxis_title="Mes", yaxis_title="Contratos")
+    return fig
 
 def crear_tabla_alertas(df: pd.DataFrame) -> pd.DataFrame:
     """Genera tabla de alertas para acción inmediata."""
