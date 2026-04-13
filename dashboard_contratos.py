@@ -472,17 +472,36 @@ with col_graf2:
 
 st.subheader("🚨 Alertas de Acción Inmediata")
 df_alertas = crear_tabla_alertas(df_f)
+# ==============================
+# 🚨 ALERTAS DE ACCIÓN INMEDIATA (MI LÓGICA + TU UI)
+# ==============================
+
+st.subheader("🚨 Alertas de Acción Inmediata")
+df_alertas = crear_tabla_alertas(df_f)
 
 if not df_alertas.empty:
-    st.dataframe(
-        df_alertas.style.applymap(
-            lambda x: 'background-color: #fef2f2' if 'ALTO' in str(x) else 
-                     'background-color: #fffbeb' if 'MEDIO' in str(x) else '',
-            subset=['Riesgo']
-        ),
-        use_container_width=True
-    )
+    # ✅ FIX: Usar .map() en lugar de .applymap() (pandas >= 2.1)
+    def highlight_risk(val):
+        if pd.isna(val):
+            return ''
+        if 'ALTO' in str(val):
+            return 'background-color: #fef2f2'
+        if 'MEDIO' in str(val):
+            return 'background-color: #fffbeb'
+        return ''
     
+    styled_alertas = df_alertas.style.map(highlight_risk, subset=['Riesgo'])
+    st.dataframe(styled_alertas, use_container_width=True)
+    
+    # Resumen de impacto
+    st.info(f"""
+    💡 **Impacto estimado**: 
+    - {len(df_alertas)} contratos requieren acción inmediata
+    - Ahorro potencial: ~15% sobre montos en riesgo (compras spot vs contrato)
+    - Tiempo ahorrado: ~2-3 horas/contrato en gestión manual
+    """)
+else:
+    st.success("✅ No hay contratos críticos que requieran acción inmediata.")
     # Resumen de impacto
     st.info(f"""
     💡 **Impacto estimado**: 
