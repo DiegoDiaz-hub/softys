@@ -527,12 +527,20 @@ st.caption(f"""
 
 import google.generativeai as genai
 
-st.divider()
-st.subheader("💬 Asistente Virtual de Compras")
-st.caption("Pregúntale sobre tus contratos, proveedores o fechas.")
+# ... (resto del código igual) ...
 
-# 1. Obtener la API Key (primero de secrets, luego del input si es necesario)
-api_key_gemini = st.secrets.get("GEMINI_API_KEY", None)
+if api_key_gemini:
+    try:
+        # Configurar la librería
+        genai.configure(api_key=api_key_gemini)
+        
+        # ✅ FIX: Usar 'gemini-pro' o 'gemini-1.5-flash' si está disponible en tu región
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash')
+        except:
+            model = genai.GenerativeModel('gemini-pro')
+        
+        # ... (resto del código del chat igual) ...
 
 if not api_key_gemini:
     # Si no está en secrets, pedir manualmente (para pruebas locales)
