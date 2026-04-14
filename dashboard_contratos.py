@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple
 # 🧠 CONFIGURACIÓN INICIAL
 # ==============================
 st.set_page_config(
-    page_title="📋 Gestión de Contratos — Softys",
+    page_title="Gestión de Contratos — Softys",
     page_icon="📋",
     layout="wide",
     initial_sidebar_state="expanded"
