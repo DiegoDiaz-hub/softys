@@ -523,14 +523,14 @@ st.caption(f"""
 """)
 
 # ==========================================================
-# 🤖 MÓDULO DE INTELIGENCIA ARTIFICIAL (GEMINI) - FINAL
+# 🤖 MÓDULO DE INTELIGENCIA ARTIFICIAL (GEMINI) - ESTABLE
 # ==========================================================
 
 import google.generativeai as genai
 
 st.divider()
 st.subheader("💬 Asistente Virtual de Compras")
-st.caption("Pregúntale sobre tus contratos, proveedores o fechas.")
+st.caption("Modelo: Gemini 1.5 Flash (Rápido y Eficiente)")
 
 # 1. Obtener la API Key
 api_key_gemini = st.secrets.get("GEMINI_API_KEY", None)
@@ -539,55 +539,54 @@ if not api_key_gemini:
 
 if api_key_gemini:
     try:
-        # Configurar la librería
         genai.configure(api_key=api_key_gemini)
         
-        # ✅ FORZAMOS EL USO DEL MODELO QUE SABEMOS QUE TIENES
-        # Según tu lista, 'gemini-2.0-flash' está disponible y es rápido/gratis.
-        model_name = 'gemini-2.0-flash'
-        model = genai.GenerativeModel(model_name)
+        # ✅ Intentamos usar el modelo más estable y gratuito
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            model_name = 'gemini-1.5-flash'
+        except:
+            # Si falla, usamos el clásico gemini-pro
+            model = genai.GenerativeModel('gemini-pro')
+            model_name = 'gemini-pro'
         
-        # Inicializar historial de chat
+        # Inicializar historial
         if "messages" not in st.session_state:
             st.session_state.messages = []
 
-        # Mostrar mensajes anteriores
+        # Mostrar historial
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
         # Input del usuario
         if prompt := st.chat_input("Ej: ¿Qué contratos vencen este mes?"):
-            # Guardar pregunta del usuario
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
 
-            # Generar respuesta de la IA
             with st.chat_message("assistant"):
                 with st.spinner(f"🤖 Pensando con {model_name}..."):
                     try:
-                        # Preparar contexto de datos (Muestra de 50 filas)
-                        cols_importantes = ['contrato_ariba', 'proveedor', 'estado_contrato_ariba', 'fecha_termino_contrato', 'riesgo_spot', 'monto_garantia_clp']
+                        # ✅ OPTIMIZACIÓN: Solo enviamos 20 filas para ahorrar cuota
+                        cols_importantes = ['contrato_ariba', 'proveedor', 'estado_contrato_ariba', 'fecha_termino_contrato', 'riesgo_spot']
                         cols_existentes = [c for c in cols_importantes if c in df_f.columns]
                         
-                        # Convertir a string para que la IA lo lea
-                        datos_muestra = df_f[cols_existentes].head(50).to_string(index=False)
+                        # Tomamos solo las primeras 20 filas
+                        datos_muestra = df_f[cols_existentes].head(20).to_string(index=False)
                         
                         prompt_sistema = f"""
-                        Eres un analista de contratos experto de Softys Chile.
+                        Eres un asistente de Softys Chile.
                         
-                        AQUÍ TIENES UNA MUESTRA DE TUS DATOS (50 registros de {len(df_f)} totales):
+                        DATOS (Muestra de 20 registros de {len(df_f)} totales):
                         {datos_muestra}
                         
                         REGLAS:
-                        1. Responde SOLO usando esta información.
-                        2. Si la pregunta no se puede responder con esta muestra, dilo honestamente.
-                        3. Sé breve y profesional.
-                        4. Usa formato Markdown.
+                        1. Responde SOLO con esta información.
+                        2. Si no está en la muestra, di: 'No veo ese dato en la muestra actual'.
+                        3. Sé breve.
                         """
 
-                        # Enviar a Gemini
                         response = model.generate_content([prompt_sistema, prompt])
                         respuesta = response.text
                         
@@ -595,9 +594,13 @@ if api_key_gemini:
                         st.session_state.messages.append({"role": "assistant", "content": respuesta})
 
                     except Exception as e:
-                        st.error(f"Error al generar respuesta: {str(e)}")
+                        # Si es error de cuota, avisamos claramente
+                        if "429" in str(e):
+                            st.error("⚠️ Límite de uso gratuito alcanzado por hoy. Intenta mañana o usa otra clave.")
+                        else:
+                            st.error(f"Error: {str(e)}")
                         
     except Exception as e:
-        st.error(f"Error de conexión con Gemini: {str(e)}")
+        st.error(f"Error de configuración: {str(e)}")
 else:
-    st.info("👈 Ingresa tu API Key arriba o configúrala en Secrets para chatear.")
+    st.info("👈 Ingresa tu API Key arriba o en Secrets para chatear.")
