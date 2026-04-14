@@ -169,8 +169,6 @@ def cargar_y_procesar_contratos(file_hash: str, file_content: bytes) -> Tuple[pd
     
     if not df_bg.empty:
         df_bg = df_bg.dropna(how='all').dropna(axis=1, how='all')
-        # ✅ FIX 2: Normalizar columnas de BG también para que el merge funcione
-        df_bg.columns = df_bg.columns.astype(str).str.strip().str.lower().str.replace(' ', '_').str.replace('-', '_')
     if not df_ariba.empty:
         df_ariba = df_ariba.dropna(how='all').dropna(axis=1, how='all')
     
@@ -193,11 +191,10 @@ def cargar_y_procesar_contratos(file_hash: str, file_content: bytes) -> Tuple[pd
     if col_termino in df.columns:
         df['dias_para_vencimiento'] = (df[col_termino] - hoy).dt.days
     
-    # ── FIX 3: umbral indefinido corregido de >2030 a >2100 ──────────────
-    # (contratos hasta 2028 son vigentes normales, no indefinidos)
+    # Identificar contratos indefinidos
     df['es_indefinido'] = df.get('contratos_indefinidos', '').str.lower().isin(['sí', 'si', 'yes', 'indefinido']) | \
                          (df.get('estado_contrato', '').str.lower() == 'indefinido') | \
-                         (df[col_termino].dt.year > 2100 if pd.api.types.is_datetime64_any_dtype(df[col_termino]) else False)
+                         (df[col_termino].dt.year > 2030 if pd.api.types.is_datetime64_any_dtype(df[col_termino]) else False)
     
     # Clasificar riesgo spot
     if 'estado_contrato_ariba' in df.columns and 'dias_para_vencimiento' in df.columns:
@@ -264,9 +261,8 @@ def crear_grafico_estado_contratos(df: pd.DataFrame) -> go.Figure:
     fig.update_traces(textinfo='percent+label')
     return fig
 
-# ✅ FUNCIÓN CORREGIDA: JSON-SAFE PARA STREAMLIT CLOUD
 def crear_timeline_vencimientos(df: pd.DataFrame) -> go.Figure:
-    """Timeline de vencimientos próximos (versión JSON-safe)."""
+    """Timeline de vencimientos próximos."""
     if 'dias_para_vencimiento' not in df.columns or df.empty:
         return None
     
@@ -274,55 +270,31 @@ def crear_timeline_vencimientos(df: pd.DataFrame) -> go.Figure:
     if df_filtro.empty:
         return None
     
-    # Determinar columna de fecha de término
     col_termino = 'fecha_término_contrato' if 'fecha_término_contrato' in df_filtro.columns else 'fecha_termino_contrato'
-    
-    if col_termino not in df_filtro.columns:
-        return None
-    
-    # Asegurar que sea datetime y filtrar NaT
-    df_filtro[col_termino] = pd.to_datetime(df_filtro[col_termino], errors='coerce')
-    df_filtro = df_filtro.dropna(subset=[col_termino])
-    
-    if df_filtro.empty:
-        return None
-    
-    # ✅ CLAVE: convertir Period a string para JSON
-    df_filtro['mes_venc'] = df_filtro[col_termino].dt.to_period('M').astype(str)
-    
-    # Agrupar por mes
-    df_agrupado = df_filtro.groupby('mes_venc').size().reset_index(name='Cantidad')
-    
-    if df_agrupado.empty:
-        return None
-    
-    fig = px.bar(
-        df_agrupado,
-        x='mes_venc',
-        y='Cantidad',
-        title="📅 Vencimientos Próximos (90 días)",
-        color='Cantidad',
-        color_continuous_scale='YlOrRd'
-    )
-    fig.update_layout(xaxis_title="Mes", yaxis_title="Contratos")
-    return fig
+    if col_termino in df_filtro.columns:
+        df_filtro['fecha_venc'] = pd.to_datetime(df_filtro[col_termino])
+        df_agrupado = df_filtro.groupby(df_filtro['fecha_venc'].dt.to_period('M')).size().reset_index()
+        df_agrupado.columns = ['Mes', 'Cantidad']
+        
+        fig = px.bar(
+            df_agrupado,
+            x='Mes',
+            y='Cantidad',
+            title="📅 Vencimientos Próximos (90 días)",
+            color='Cantidad',
+            color_continuous_scale='YlOrRd'
+        )
+        return fig
+    return None
 
-# ✅ FUNCIÓN CORREGIDA: ROBUSTA PARA COLUMNAS OPCIONALES
 def crear_tabla_alertas(df: pd.DataFrame) -> pd.DataFrame:
-    """Genera tabla de alertas para acción inmediata (versión robusta)."""
+    """Genera tabla de alertas para acción inmediata."""
     alertas = []
     
-    # ── FIX 1: Buscar columna BG por patrón en lugar de nombre exacto ──
-    col_bg = next((c for c in df.columns if 'boleta' in c and 'ariba' in c), None)
-    if col_bg:
-        mask_bg = df[col_bg].astype(str).str.lower().str.contains('sí|si|yes', na=False)
-    else:
-        mask_bg = pd.Series([False] * len(df), index=df.index)
-    
-    # Filtrar contratos en riesgo que requieren BG
+    # Contratos vencidos o por vencer con garantía activa
     mask = (
         (df['riesgo_spot'].isin(['ALTO 🔴', 'MEDIO 🟡'])) & 
-        mask_bg
+        (df.get('aplica_boleta_de_garantía_ariba', '').str.lower() == 'sí')
     )
     
     for _, row in df[mask].iterrows():
@@ -401,9 +373,6 @@ with st.sidebar:
     estados = ['Todos'] + sorted(df['riesgo_spot'].unique().tolist()) if 'riesgo_spot' in df.columns else ['Todos']
     riesgo_sel = st.selectbox("Riesgo Spot", estados)
 
-    # ── FIX 1: nombres de columna corregidos tras normalización ──────────
-    # Tras .str.replace(' ', '_'), las columnas tienen _ no espacios
-
     # Gerencia
     if 'gerencia' in df.columns:
         gerencias = ['Todas'] + sorted(df['gerencia'].dropna().unique().astype(str).tolist())
@@ -418,9 +387,9 @@ with st.sidebar:
     else:
         area_sel = 'Todas'
 
-    # Comprador Estratégico — columna normalizada es 'comprador_estratégico' (con _)
-    if 'comprador_estratégico' in df.columns:
-        compradores = ['Todos'] + sorted(df['comprador_estratégico'].dropna().unique().astype(str).tolist())
+    # Comprador Estratégico
+    if 'comprador estratégico' in df.columns:
+        compradores = ['Todos'] + sorted(df['comprador estratégico'].dropna().unique().astype(str).tolist())
         comprador_sel = st.selectbox("Comprador Estratégico", compradores)
     else:
         comprador_sel = 'Todos'
@@ -441,9 +410,8 @@ if gerencia_sel != 'Todas' and 'gerencia' in df_f.columns:
     df_f = df_f[df_f['gerencia'] == gerencia_sel]
 if area_sel != 'Todas' and 'área' in df_f.columns:
     df_f = df_f[df_f['área'] == area_sel]
-# ── FIX 1 (continuación): filtro usa nombre normalizado correcto ──────
-if comprador_sel != 'Todos' and 'comprador_estratégico' in df_f.columns:
-    df_f = df_f[df_f['comprador_estratégico'] == comprador_sel]
+if comprador_sel != 'Todos' and 'comprador estratégico' in df_f.columns:
+    df_f = df_f[df_f['comprador estratégico'] == comprador_sel]
 if planta_sel != 'Todas' and 'planta' in df_f.columns:
     df_f = df_f[df_f['planta'].str.contains(planta_sel, na=False)]
 
@@ -474,58 +442,15 @@ st.subheader("🚨 Alertas de Acción Inmediata")
 df_alertas = crear_tabla_alertas(df_f)
 
 if not df_alertas.empty:
-    # ✅ FIX: Usar .map() en lugar de .applymap() (pandas >= 2.1)
-    def highlight_risk(val):
-        if pd.isna(val):
-            return ''
-        if 'ALTO' in str(val):
-            return 'background-color: #fef2f2'
-        if 'MEDIO' in str(val):
-            return 'background-color: #fffbeb'
-        return ''
+    st.dataframe(
+        df_alertas.style.applymap(
+            lambda x: 'background-color: #fef2f2' if 'ALTO' in str(x) else 
+                     'background-color: #fffbeb' if 'MEDIO' in str(x) else '',
+            subset=['Riesgo']
+        ),
+        use_container_width=True
+    )
     
-    styled_alertas = df_alertas.style.map(highlight_risk, subset=['Riesgo'])
-    st.dataframe(styled_alertas, use_container_width=True)
-    
-    # Resumen de impacto
-    st.info(f"""
-    💡 **Impacto estimado**: 
-    - {len(df_alertas)} contratos requieren acción inmediata
-    - Ahorro potencial: ~15% sobre montos en riesgo (compras spot vs contrato)
-    - Tiempo ahorrado: ~2-3 horas/contrato en gestión manual
-    """)
-else:
-    st.success("✅ No hay contratos críticos que requieran acción inmediata.")
-# ==============================
-# 🚨 ALERTAS DE ACCIÓN INMEDIATA (MI LÓGICA + TU UI)
-# ==============================
-
-st.subheader("🚨 Alertas de Acción Inmediata")
-df_alertas = crear_tabla_alertas(df_f)
-
-if not df_alertas.empty:
-    # ✅ FIX: Usar .map() en lugar de .applymap() (pandas >= 2.1)
-    def highlight_risk(val):
-        if pd.isna(val):
-            return ''
-        if 'ALTO' in str(val):
-            return 'background-color: #fef2f2'
-        if 'MEDIO' in str(val):
-            return 'background-color: #fffbeb'
-        return ''
-    
-    styled_alertas = df_alertas.style.map(highlight_risk, subset=['Riesgo'])
-    st.dataframe(styled_alertas, use_container_width=True)
-    
-    # Resumen de impacto
-    st.info(f"""
-    💡 **Impacto estimado**: 
-    - {len(df_alertas)} contratos requieren acción inmediata
-    - Ahorro potencial: ~15% sobre montos en riesgo (compras spot vs contrato)
-    - Tiempo ahorrado: ~2-3 horas/contrato en gestión manual
-    """)
-else:
-    st.success("✅ No hay contratos críticos que requieran acción inmediata.")
     # Resumen de impacto
     st.info(f"""
     💡 **Impacto estimado**: 
@@ -613,91 +538,62 @@ with tab3:
         
         c1, c2 = st.columns(2)
         with c1:
-            # Usar nombres normalizados ('estado' en minúscula)
-            if 'estado' in df_bg.columns:
-                bg_counts = df_bg['estado'].value_counts().reset_index()
-                bg_counts.columns = ['Estado', 'Cantidad']
-                bg_color = {'VIGENTE': '#27ae60', 'VENCIDA': '#e74c3c', 'ENTREGADA': '#3498db', 'ENDOSADA': '#95a5a6'}
-                fig_bg = px.pie(
-                    bg_counts, names='Estado', values='Cantidad',
-                    title='Estado de Boletas',
-                    hole=0.4,
-                    color='Estado',
-                    color_discrete_map={k: bg_color.get(k, '#95a5a6') for k in bg_counts['Estado']}
-                )
-                fig_bg.update_traces(textposition='inside', textinfo='percent+label')
-                st.plotly_chart(fig_bg, use_container_width=True)
+            bg_counts = df_bg['Estado'].value_counts().reset_index()
+            bg_counts.columns = ['Estado', 'Cantidad']
+            bg_color = {'VIGENTE': '#27ae60', 'VENCIDA': '#e74c3c', 'ENTREGADA': '#3498db', 'ENDOSADA': '#95a5a6'}
+            fig_bg = px.pie(
+                bg_counts, names='Estado', values='Cantidad',
+                title='Estado de Boletas',
+                hole=0.4,
+                color='Estado',
+                color_discrete_map={k: bg_color.get(k, '#95a5a6') for k in bg_counts['Estado']}
+            )
+            fig_bg.update_traces(textposition='inside', textinfo='percent+label')
+            st.plotly_chart(fig_bg, use_container_width=True)
         
         with c2:
             # BG vencidas por contratista
-            if 'estado' in df_bg.columns and 'contratista' in df_bg.columns:
-                df_bg_venc = df_bg[df_bg['estado'] == 'VENCIDA']
-                if not df_bg_venc.empty:
-                    top_contratistas = df_bg_venc['contratista'].value_counts().head(10)
-                    fig_bg_area = px.bar(
-                        x=top_contratistas.values,
-                        y=top_contratistas.index,
-                        orientation='h',
-                        title='Top Contratistas con BG Vencidas',
-                        color=top_contratistas.values,
-                        color_continuous_scale='Reds'
-                    )
-                    fig_bg_area.update_layout(xaxis_title='BG Vencidas', yaxis_title='Contratista')
-                    st.plotly_chart(fig_bg_area, use_container_width=True)
+            df_bg_venc = df_bg[df_bg['Estado'] == 'VENCIDA']
+            if not df_bg_venc.empty:
+                top_contratistas = df_bg_venc['CONTRATISTA'].value_counts().head(10)
+                fig_bg_area = px.bar(
+                    x=top_contratistas.values,
+                    y=top_contratistas.index,
+                    orientation='h',
+                    title='Top Contratistas con BG Vencidas',
+                    color=top_contratistas.values,
+                    color_continuous_scale='Reds'
+                )
+                fig_bg_area.update_layout(xaxis_title='BG Vencidas', yaxis_title='Contratista')
+                st.plotly_chart(fig_bg_area, use_container_width=True)
         
         # Tabla de alertas BG
         st.markdown("#### ⚠️ Contratos que Requieren BG pero Tienen Estado Crítico")
-        
-        # Merge seguro con validación de columnas
-        if 'cw' in df_bg.columns and 'contrato_ariba' in df.columns:
-            # Filtrar solo CWs válidos (formato CW+numeros)
-            mask_valid_cw = df_bg['cw'].astype(str).str.match(r'CW\d+', na=False)
-            df_bg_valid = df_bg[mask_valid_cw].copy()
-            
-            if not df_bg_valid.empty and 'estado' in df_bg_valid.columns:
-                df_merge = df.merge(
-                    df_bg_valid[['cw', 'estado', 'venc.', 'monto']], 
-                    left_on='contrato_ariba', 
-                    right_on='cw', 
-                    how='inner'
-                )
-                
-                # Buscar columna BG por patrón en df_merge
-                col_bg_merge = next((c for c in df_merge.columns if 'boleta' in c and 'ariba' in c), None)
-                if col_bg_merge:
-                    mask_bg_merge = df_merge[col_bg_merge].astype(str).str.lower().str.contains('sí|si|yes', na=False)
-                else:
-                    mask_bg_merge = pd.Series([False] * len(df_merge), index=df_merge.index)
-                
-                criticas = df_merge[
-                    (df_merge['estado'].str.upper().str.contains('VENCIDA|ENTREGADA', na=False)) & 
-                    mask_bg_merge
-                ]
-                
-                if not criticas.empty:
-                    st.dataframe(
-                        criticas[['contrato_ariba', 'proveedor', 'estado', 'venc.', 'monto']], 
-                        use_container_width=True
-                    )
-                    st.warning(f"⚠️ {len(criticas)} contratos con BG requerida pero en estado crítico")
-                else:
-                    st.success("✅ Todos los contratos que requieren BG están al día.")
+        if 'contrato_ariba' in df.columns and 'estado_garantía' in df_bg.columns:
+            # Cruce simple por CW
+            df_merge = df.merge(df_bg[['CW', 'Estado', 'VENC.', 'MONTO']], 
+                               left_on='contrato_ariba', right_on='CW', how='inner')
+            criticas = df_merge[
+                (df_merge['Estado'].isin(['VENCIDA', 'ENTREGADA'])) & 
+                (df_merge['aplica_boleta_de_garantía_ariba'].str.lower() == 'sí')
+            ]
+            if not criticas.empty:
+                st.dataframe(criticas[['contrato_ariba', 'proveedor', 'Estado', 'VENC.', 'MONTO']], use_container_width=True)
+                st.warning(f"⚠️ {len(criticas)} contratos con BG requerida pero en estado crítico")
             else:
-                st.info("ℹ️ No hay datos válidos de BG para cruzar con contratos.")
-        else:
-            st.info("ℹ️ Columnas necesarias para el cruce no encontradas en los datos.")
+                st.success("✅ Todos los contratos que requieren BG están al día.")
     else:
         st.info("ℹ️ No se encontró la hoja 'BG' en el archivo. Agrega esta sheet para análisis de garantías.")
+
 # ---------- TAB 4: EXPLORADOR (TU UI) ----------
 with tab4:
     st.markdown("### 🔍 Explorador de Datos")
 
-    # ── FIX 1 (continuación): nombres normalizados con _ en defaults ─────
     col_mostrar = st.multiselect(
         "Columnas a mostrar",
         options=df_f.columns.tolist(),
         default=[c for c in ['contrato_ariba', 'proveedor', 'área', 'gerencia', 
-                           'comprador_estratégico', 'fecha_término_contrato',
+                           'comprador estratégico', 'fecha_término_contrato',
                            'dias_para_vencimiento', 'riesgo_spot', 'planta'] 
                 if c in df_f.columns]
     )
@@ -772,7 +668,7 @@ with st.expander("🔧 Diagnóstico Técnico"):
             "Contratos filtrados": len(df_f),
             "Rango fechas": f"{df['fecha_inicio'].min() if 'fecha_inicio' in df.columns else 'N/A'} → {df['fecha_término_contrato'].max() if 'fecha_término_contrato' in df.columns else 'N/A'}",
             "Última actualización": datetime.now().strftime('%d/%m/%Y %H:%M'),
-            "Compradores únicos": df['comprador_estratégico'].nunique() if 'comprador_estratégico' in df.columns else 0,
+            "Compradores únicos": df['comprador estratégico'].nunique() if 'comprador estratégico' in df.columns else 0,
             "Proveedores únicos": df['proveedor'].nunique() if 'proveedor' in df.columns else 0
         })
 
