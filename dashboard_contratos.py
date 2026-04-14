@@ -521,8 +521,9 @@ st.caption(f"""
 🔹 Parser robusto: Maneja formatos `30"-"09"-"2025`, `4/26/19`, `99.99.9999`  
 🔹 Próximo paso: Automatizar con Task Scheduler + Power Automate
 """)
+
 # ==========================================================
-# 🤖 MÓDULO DE INTELIGENCIA ARTIFICIAL (GEMINI) - VERSIÓN ROBUSTA
+# 🤖 MÓDULO DE INTELIGENCIA ARTIFICIAL (GEMINI) - ACTUALIZADO
 # ==========================================================
 
 import google.generativeai as genai
@@ -540,21 +541,8 @@ if api_key_gemini:
     try:
         genai.configure(api_key=api_key_gemini)
         
-        # Intentar detectar el modelo disponible automáticamente
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # Prioridad de modelos: Flash es más rápido, Pro es más inteligente
-        model_name = None
-        if 'models/gemini-1.5-flash' in available_models:
-            model_name = 'gemini-1.5-flash'
-        elif 'models/gemini-pro' in available_models:
-            model_name = 'gemini-pro'
-        elif 'models/gemini-1.5-pro' in available_models:
-            model_name = 'gemini-1.5-pro'
-        else:
-            st.error(f"⚠️ No se encontró un modelo compatible. Modelos disponibles: {available_models}")
-            st.stop()
-
+        # ✅ FIX: Usar un modelo disponible en tu lista (gemini-2.0-flash es rápido y gratuito)
+        model_name = 'gemini-2.0-flash'
         model = genai.GenerativeModel(model_name)
         
         # Inicializar historial
@@ -573,22 +561,26 @@ if api_key_gemini:
                 st.markdown(prompt)
 
             with st.chat_message("assistant"):
-                with st.spinner(f"🔍 Pensando con {model_name}..."):
+                with st.spinner(f"🔍 Analizando datos con {model_name}..."):
                     try:
-                        # Contexto de datos
+                        # Contexto de datos (Muestra inteligente)
                         cols_importantes = ['contrato_ariba', 'proveedor', 'estado_contrato_ariba', 'fecha_termino_contrato', 'riesgo_spot', 'monto_garantia_clp']
                         cols_existentes = [c for c in cols_importantes if c in df_f.columns]
-                        datos_contexto = df_f[cols_existentes].head(30).to_string(index=False)
+                        
+                        # Si hay muchas columnas, tomamos solo las primeras 50 filas para no saturar
+                        muestra_datos = df_f[cols_existentes].head(50).to_string(index=False)
                         
                         sistema_prompt = f"""
-                        Eres un asistente experto en gestión de contratos para Softys.
-                        DATOS DISPONIBLES (Muestra de 30 registros de {len(df_f)} totales):
-                        {datos_contexto}
+                        Eres un asistente experto en gestión de contratos para Softys Chile.
+                        
+                        CONTEXTO DE DATOS (Muestra de 50 registros de un total de {len(df_f)}):
+                        {muestra_datos}
                         
                         INSTRUCCIONES:
-                        1. Responde SOLO basándote en los datos mostrados.
-                        2. Si no hay información suficiente en la muestra, dilo claramente.
-                        3. Sé profesional y conciso.
+                        1. Responde basándote en esta muestra. Si la pregunta es muy específica y no está en la muestra, aclara que estás viendo solo una parte de los datos.
+                        2. Sé profesional, directo y útil.
+                        3. Usa formato Markdown (negritas, listas) para facilitar la lectura.
+                        4. Si mencionas un contrato, usa su código (ej: CW...).
                         """
 
                         response = model.generate_content([sistema_prompt, prompt])
@@ -601,4 +593,4 @@ if api_key_gemini:
     except Exception as e:
         st.error(f"⚠️ Error de configuración: {e}")
 else:
-    st.info("👈 Ingresa tu API Key para activar el asistente.")
+    st.info("👈 Ingresa tu API Key en el sidebar o en Secrets para activar el asistente.")
