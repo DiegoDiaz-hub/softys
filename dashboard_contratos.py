@@ -542,7 +542,7 @@ if api_key_gemini:
     try:
         # Configurar la librería
         genai.configure(api_key=api_key_gemini)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-1.5-pro')
         
         # Inicializar historial de chat si no existe
         if "messages" not in st.session_state:
