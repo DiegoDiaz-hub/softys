@@ -523,14 +523,14 @@ st.caption(f"""
 """)
 
 # ==========================================================
-# 🤖 MÓDULO DE INTELIGENCIA ARTIFICIAL (GEMINI) - ESTABLE
+# 🤖 MÓDULO DE INTELIGENCIA ARTIFICIAL (GEMINI) - CLÁSICO
 # ==========================================================
 
 import google.generativeai as genai
 
 st.divider()
 st.subheader("💬 Asistente Virtual de Compras")
-st.caption("Modelo: Gemini 1.5 Flash (Rápido y Eficiente)")
+st.caption("Modelo: Gemini Pro (Estable y Gratuito)")
 
 # 1. Obtener la API Key
 api_key_gemini = st.secrets.get("GEMINI_API_KEY", None)
@@ -541,14 +541,8 @@ if api_key_gemini:
     try:
         genai.configure(api_key=api_key_gemini)
         
-        # ✅ Intentamos usar el modelo más estable y gratuito
-        try:
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            model_name = 'gemini-1.5-flash'
-        except:
-            # Si falla, usamos el clásico gemini-pro
-            model = genai.GenerativeModel('gemini-pro')
-            model_name = 'gemini-pro'
+        # ✅ USAMOS EL MODELO CLÁSICO 'gemini-pro'
+        model = genai.GenerativeModel('gemini-pro')
         
         # Inicializar historial
         if "messages" not in st.session_state:
@@ -566,19 +560,19 @@ if api_key_gemini:
                 st.markdown(prompt)
 
             with st.chat_message("assistant"):
-                with st.spinner(f"🤖 Pensando con {model_name}..."):
+                with st.spinner("🤖 Pensando..."):
                     try:
-                        # ✅ OPTIMIZACIÓN: Solo enviamos 20 filas para ahorrar cuota
+                        # ✅ OPTIMIZACIÓN MÁXIMA: Solo 10 filas para no gastar cuota
                         cols_importantes = ['contrato_ariba', 'proveedor', 'estado_contrato_ariba', 'fecha_termino_contrato', 'riesgo_spot']
                         cols_existentes = [c for c in cols_importantes if c in df_f.columns]
                         
-                        # Tomamos solo las primeras 20 filas
-                        datos_muestra = df_f[cols_existentes].head(20).to_string(index=False)
+                        # Tomamos solo las primeras 10 filas
+                        datos_muestra = df_f[cols_existentes].head(10).to_string(index=False)
                         
                         prompt_sistema = f"""
                         Eres un asistente de Softys Chile.
                         
-                        DATOS (Muestra de 20 registros de {len(df_f)} totales):
+                        DATOS (Muestra de 10 registros de {len(df_f)} totales):
                         {datos_muestra}
                         
                         REGLAS:
@@ -594,9 +588,8 @@ if api_key_gemini:
                         st.session_state.messages.append({"role": "assistant", "content": respuesta})
 
                     except Exception as e:
-                        # Si es error de cuota, avisamos claramente
                         if "429" in str(e):
-                            st.error("⚠️ Límite de uso gratuito alcanzado por hoy. Intenta mañana o usa otra clave.")
+                            st.error("⚠️ Límite diario alcanzado. Intenta mañana.")
                         else:
                             st.error(f"Error: {str(e)}")
                         
