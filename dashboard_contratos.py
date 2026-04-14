@@ -522,7 +522,7 @@ st.caption(f"""
 🔹 Próximo paso: Automatizar con Task Scheduler + Power Automate
 """)
 # ==========================================================
-# 🤖 MÓDULO DE INTELIGENCIA ARTIFICIAL (GEMINI)
+# 🤖 MÓDULO DE INTELIGENCIA ARTIFICIAL (GEMINI) - VERSIÓN ROBUSTA
 # ==========================================================
 
 import google.generativeai as genai
@@ -531,20 +531,33 @@ st.divider()
 st.subheader("💬 Asistente Virtual de Compras")
 st.caption("Pregúntale sobre tus contratos, proveedores o fechas.")
 
-# 1. Obtener la API Key (primero de secrets, luego del input si es necesario)
+# 1. Obtener la API Key
 api_key_gemini = st.secrets.get("GEMINI_API_KEY", None)
-
 if not api_key_gemini:
-    # Si no está en secrets, pedir manualmente (para pruebas locales)
     api_key_gemini = st.text_input("🔑 Tu API Key de Gemini", type="password", help="Obtén una gratis en aistudio.google.com")
 
 if api_key_gemini:
     try:
-        # Configurar la librería
         genai.configure(api_key=api_key_gemini)
-        model = genai.GenerativeModel('gemini-1.5-pro')
         
-        # Inicializar historial de chat si no existe
+        # Intentar detectar el modelo disponible automáticamente
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # Prioridad de modelos: Flash es más rápido, Pro es más inteligente
+        model_name = None
+        if 'models/gemini-1.5-flash' in available_models:
+            model_name = 'gemini-1.5-flash'
+        elif 'models/gemini-pro' in available_models:
+            model_name = 'gemini-pro'
+        elif 'models/gemini-1.5-pro' in available_models:
+            model_name = 'gemini-1.5-pro'
+        else:
+            st.error(f"⚠️ No se encontró un modelo compatible. Modelos disponibles: {available_models}")
+            st.stop()
+
+        model = genai.GenerativeModel(model_name)
+        
+        # Inicializar historial
         if "messages" not in st.session_state:
             st.session_state.messages = []
 
@@ -555,52 +568,37 @@ if api_key_gemini:
 
         # Input del usuario
         if prompt := st.chat_input("Ej: ¿Qué contratos vencen este mes?"):
-            # Agregar mensaje del usuario
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
 
-            # Procesar respuesta
             with st.chat_message("assistant"):
-                with st.spinner("🔍 Analizando tus datos..."):
+                with st.spinner(f"🔍 Pensando con {model_name}..."):
                     try:
-                        # Preparar contexto (Muestra de datos para que la IA sepa de qué hablamos)
+                        # Contexto de datos
                         cols_importantes = ['contrato_ariba', 'proveedor', 'estado_contrato_ariba', 'fecha_termino_contrato', 'riesgo_spot', 'monto_garantia_clp']
-                        # Filtramos solo las columnas que existen en tu archivo
                         cols_existentes = [c for c in cols_importantes if c in df_f.columns]
-                        
-                        # Creamos un resumen de texto de los datos actuales (primeros 30 registros)
                         datos_contexto = df_f[cols_existentes].head(30).to_string(index=False)
-                        total_registros = len(df_f)
-
-                        # Prompt del sistema
+                        
                         sistema_prompt = f"""
                         Eres un asistente experto en gestión de contratos para Softys.
-                        
-                        DATOS DISPONIBLES:
-                        Tienes acceso a una tabla con {total_registros} contratos.
-                        Aquí tienes una muestra de los primeros 30 registros:
-                        
+                        DATOS DISPONIBLES (Muestra de 30 registros de {len(df_f)} totales):
                         {datos_contexto}
                         
                         INSTRUCCIONES:
-                        1. Responde SOLO basándote en los datos mostrados arriba.
-                        2. Si la pregunta requiere datos que no están en la muestra, aclara que solo estás viendo una muestra parcial.
-                        3. Sé profesional, directo y útil para un comprador táctico.
-                        4. Usa formato Markdown (negritas, listas) para facilitar la lectura.
-                        5. Si mencionas un contrato, usa su código (ej: CW...).
+                        1. Responde SOLO basándote en los datos mostrados.
+                        2. Si no hay información suficiente en la muestra, dilo claramente.
+                        3. Sé profesional y conciso.
                         """
 
-                        # Enviar a la IA
                         response = model.generate_content([sistema_prompt, prompt])
                         respuesta_ia = response.text
-
                         st.markdown(respuesta_ia)
                         st.session_state.messages.append({"role": "assistant", "content": respuesta_ia})
                         
                     except Exception as e:
-                        st.error(f"⚠️ Error al conectar con la IA: {e}")
+                        st.error(f"⚠️ Error al generar respuesta: {e}")
     except Exception as e:
-        st.error(f"⚠️ Error de configuración: Verifica tu API Key. ({e})")
+        st.error(f"⚠️ Error de configuración: {e}")
 else:
-    st.info("👈 Ingresa tu API Key arriba o configúrala en Secrets para activar el asistente.")
+    st.info("👈 Ingresa tu API Key para activar el asistente.")
