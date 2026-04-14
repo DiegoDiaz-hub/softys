@@ -523,14 +523,14 @@ st.caption(f"""
 """)
 
 # ==========================================================
-# 🤖 MÓDULO DE INTELIGENCIA ARTIFICIAL (GEMINI) - CLÁSICO
+# 🤖 MÓDULO DE INTELIGENCIA ARTIFICIAL (GEMINI) - FINAL
 # ==========================================================
 
 import google.generativeai as genai
 
 st.divider()
 st.subheader("💬 Asistente Virtual de Compras")
-st.caption("Modelo: Gemini Pro (Estable y Gratuito)")
+st.caption("Modelo: Gemini 2.0 Flash (Última Generación)")
 
 # 1. Obtener la API Key
 api_key_gemini = st.secrets.get("GEMINI_API_KEY", None)
@@ -541,8 +541,8 @@ if api_key_gemini:
     try:
         genai.configure(api_key=api_key_gemini)
         
-        # ✅ USAMOS EL MODELO CLÁSICO 'gemini-pro'
-        model = genai.GenerativeModel('gemini-pro')
+        # ✅ USAMOS EXCLUSIVAMENTE EL MODELO QUE TU CUENTA TIENE HABILITADO
+        model = genai.GenerativeModel('gemini-2.0-flash')
         
         # Inicializar historial
         if "messages" not in st.session_state:
@@ -562,17 +562,17 @@ if api_key_gemini:
             with st.chat_message("assistant"):
                 with st.spinner("🤖 Pensando..."):
                     try:
-                        # ✅ OPTIMIZACIÓN MÁXIMA: Solo 10 filas para no gastar cuota
+                        # ✅ OPTIMIZACIÓN EXTREMA: Solo 5 filas para no gastar cuota
                         cols_importantes = ['contrato_ariba', 'proveedor', 'estado_contrato_ariba', 'fecha_termino_contrato', 'riesgo_spot']
                         cols_existentes = [c for c in cols_importantes if c in df_f.columns]
                         
-                        # Tomamos solo las primeras 10 filas
-                        datos_muestra = df_f[cols_existentes].head(10).to_string(index=False)
+                        # Tomamos solo las primeras 5 filas
+                        datos_muestra = df_f[cols_existentes].head(5).to_string(index=False)
                         
                         prompt_sistema = f"""
                         Eres un asistente de Softys Chile.
                         
-                        DATOS (Muestra de 10 registros de {len(df_f)} totales):
+                        DATOS (Muestra de 5 registros de {len(df_f)} totales):
                         {datos_muestra}
                         
                         REGLAS:
