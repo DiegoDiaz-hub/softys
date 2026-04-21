@@ -482,6 +482,28 @@ if 'comprador_estrategico' in df_f.columns and comprador_ariba_sel != 'Todos':
 if 'comprador_estrategico_consol' in df_f.columns and comprador_consol_sel != 'Todos':
     df_f = df_f[df_f['comprador_estrategico_consol'] == comprador_consol_sel]
 
+
+# ── FILTROS DE COMPRADORES (Doble opción: Ariba + Consolidado) ─────────────────
+
+# 1. Comprador desde Info Ariba (fuente principal)
+comprador_ariba_sel = 'Todos'
+if 'comprador_estrategico' in df.columns:
+    compradores_ariba = ['Todos'] + sorted(df['comprador_estrategico'].dropna().unique().astype(str).tolist())
+    comprador_ariba_sel = st.selectbox("👤 Comprador (Info Ariba)", compradores_ariba)
+
+st.divider()
+
+# 2. Comprador Estratégico desde Consolidado de Contratos
+comprador_consol_sel = 'Todos'
+if 'comprador_estrategico_consol' in df.columns:
+    # Limpiar valores nulos y duplicados
+    valores_consol = df['comprador_estrategico_consol'].dropna().astype(str).str.strip()
+    valores_consol = valores_consol[valores_consol != 'nan']  # Eliminar strings 'nan'
+    if len(valores_consol.unique()) > 0:
+        compradores_consol = ['Todos'] + sorted(valores_consol.unique().tolist())
+        comprador_consol_sel = st.selectbox("👤 Comprador Estratégico (Consolidado)", compradores_consol)
+
+
 # Info visual de filtros activos
 filtros_activos = []
 if comprador_ariba_sel != 'Todos':
