@@ -409,26 +409,6 @@ with st.sidebar:
     else:
         planta_sel = 'Todas'
 
-
-    # --- FILTRO COMPRADOR ESTRATÉGICO (Consolidado de Contratos) ---
-    comprador_consol_sel = 'Todos'
-    if 'comprador_estrategico_consol' in df.columns:
-        # Obtenemos los nombres únicos de la hoja consolidado
-        compradores_consol = sorted(df['comprador_estrategico_consol'].dropna().unique().astype(str).tolist())
-        compradores_consol.insert(0, 'Todos')
-        
-        st.divider()
-        comprador_consol_sel = st.selectbox(
-            "👤 Comprador Estratégico (Consolidado)", 
-            compradores_consol
-        )
-
-# Filtro para Comprador del Consolidado
-if 'comprador_estrategico_consol' in df_f.columns and comprador_consol_sel != 'Todos':
-    df_f = df_f[df_f['comprador_estrategico_consol'] == comprador_consol_sel]
-
-
-    
     estados_contrato = ['Todos'] + sorted(df['estado_contrato'].dropna().unique().astype(str).tolist())
     estado_sel = st.selectbox("Estado Contrato (Ariba)", estados_contrato)
 
