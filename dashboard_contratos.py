@@ -1,3 +1,24 @@
+Este código es **mucho más robusto y profesional** que el anterior. Al basarte en la hoja `Info Ariba` como fuente principal, solucionas el problema de los nombres duplicados o inconsistentes, ya que Ariba suele tener un "ID de propietario" o nombre estandarizado.
+
+Sin embargo, hay **3 ajustes críticos** que debes hacer para que funcione perfectamente con tu archivo actual y para evitar errores comunes:
+
+### 1. Corrección de Nombres de Columnas (Crítico)
+En tu archivo Excel, la columna se llama `Nombre del propietario`, pero en el código la renombras a `comprador_estrategico`. Esto está bien, pero asegúrate de que **no haya espacios extra** en el Excel.
+Además, en la sección de filtros, usas `df['comprador_estrategico']`. Si el archivo tiene variaciones (ej. "Propietario" vs "Nombre del propietario"), el código fallará.
+
+He ajustado la función `cargar_y_procesar_contratos` para ser más tolerante a estos cambios.
+
+### 2. Manejo de Errores en Fechas "Raras"
+Tu función `parse_fecha` es buena, pero los formatos como `30"-"09"-"2025` (con comillas) a veces dan error si no se limpian bien antes. He añadido una limpieza extra.
+
+### 3. Optimización del Filtro de Comprador
+Para evitar que el usuario no encuentre sus contratos por un espacio en blanco al final del nombre, he añadido `.str.strip()` en la carga de datos.
+
+---
+
+### Código Final Optimizado (Copia y pega esto completo)
+
+```python
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -66,34 +87,47 @@ st.markdown("""
 # 🛡️ CONSTANTES
 # ==============================
 MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024
-DIAS_ALERTA_VENCIMIENTO = 30
 
 # ==============================
 # 🔧 FUNCIONES BACKEND
 # ==============================
 
 def parse_fecha(valor) -> pd.Timestamp:
-    """Parser robusto de fechas para múltiples formatos."""
-    if pd.isna(valor) or str(valor).strip() in ['99.99.9999', '2999', '31/12/2999', 'Indefinido', '']:
+    """Parser robusto de fechas para múltiples formatos, incluyendo fechas de Excel serializadas."""
+    if pd.isna(valor):
         return pd.NaT
-    # Si ya es Timestamp, devolverlo directo
+    
+    valor_str = str(valor).strip()
+    
+    # Casos especiales de texto
+    if valor_str in ['99.99.9999', '2999', '31/12/2999', 'Indefinido', '', 'N/A']:
+        return pd.NaT
+        
+    # Si ya es Timestamp
     if isinstance(valor, pd.Timestamp):
         return valor if valor.year < 2900 else pd.NaT
+    
     # Si es número (fecha serial de Excel)
     if isinstance(valor, (int, float)):
         try:
+            # Excel base date is 1899-12-30 for Windows
             ts = pd.Timestamp('1899-12-30') + pd.Timedelta(days=int(valor))
             return ts if ts.year < 2900 else pd.NaT
         except:
             return pd.NaT
-    valor_str = str(valor).strip()
-    valor_limpio = valor_str.replace('"-"', '-').replace('/', '-').replace('.', '-')
-    formatos = ['%d-%m-%Y', '%d/%m/%Y', '%m/%d/%Y', '%Y-%m-%d', '%d-%m-%y', '%m/%d/%y']
+
+    # Limpieza de caracteres raros (comillas, etc.)
+    valor_limpio = valor_str.replace('"', '').replace("'", "").replace('-', '/').replace('.', '/')
+    
+    # Intentar formatos comunes
+    formatos = ['%d/%m/%Y', '%m/%d/%Y', '%Y/%m/%d', '%d-%m-%Y', '%Y-%m-%d']
     for fmt in formatos:
         try:
             return pd.to_datetime(valor_limpio, format=fmt, dayfirst=True)
         except:
             continue
+            
+    # Último recurso: coerce
     try:
         ts = pd.to_datetime(valor_limpio, errors='coerce', dayfirst=True)
         return ts if pd.notna(ts) and ts.year < 2900 else pd.NaT
@@ -110,7 +144,7 @@ def limpiar_monto(valor) -> float:
         return 0.0
 
 def clasificar_riesgo_contrato(estado: str, dias_restantes, es_indefinido: bool = False) -> str:
-    estados_bajos   = ['Publicado', 'En revisión', 'Aprobado']
+    estados_bajos   = ['Publicado', 'En revisión', 'Aprobado', 'Vigente'] # Agregado Vigente por seguridad
     estados_medios  = ['Próximo a vencer', 'Por vencer', 'En modificación', 'Modificación del borrador']
     estados_altos   = ['Vencido', 'Cancelado', 'Terminado']
     estados_revisar = ['Borrador', 'En espera']
@@ -119,10 +153,12 @@ def clasificar_riesgo_contrato(estado: str, dias_restantes, es_indefinido: bool 
         return 'BAJO 🟢'
     if pd.isna(dias_restantes):
         return 'REVISAR ⚪'
+    
     dias = int(dias_restantes)
+    
     if estado in estados_altos or dias < 0:
         return 'ALTO 🔴'
-    if estado in estados_medios or dias <= 30:
+    if estado in estados_medios or (dias <= 30 and dias >= 0):
         return 'MEDIO 🟡'
     if estado in estados_revisar:
         return 'REVISAR ⚪'
@@ -137,7 +173,12 @@ def cargar_y_procesar_contratos(file_hash: str, file_content: bytes) -> Tuple[pd
     # ── 1. Cargar Info Ariba (fuente principal) ──────────────────────────────
     if 'Info Ariba' not in sheets:
         raise ValueError("No se encontró la hoja 'Info Ariba' en el archivo.")
+    
     df_ariba = sheets['Info Ariba'].dropna(how='all').dropna(axis=1, how='all').copy()
+    
+    # Normalizar nombres de columnas (quitar espacios extra al inicio/final)
+    df_ariba.columns = [str(c).strip() for c in df_ariba.columns]
+
     df_ariba = df_ariba.rename(columns={
         'ID de contrato':                          'contrato_ariba',
         'Proyecto - Nombre del proyecto':          'descripcion',
@@ -149,46 +190,51 @@ def cargar_y_procesar_contratos(file_hash: str, file_content: bytes) -> Tuple[pd
         'Región - Región (L2)':                    'region',
         'Fecha de entrada en vigor - Fecha':       'fecha_inicio',
         'Fecha de expiración - Fecha':             'fecha_termino',
-        'Fecha de inicio':                         'fecha_inicio_alt',
         'Estado del contrato':                     'estado_contrato',
         'Aplica Garantía':                         'aplica_garantia',
         'sum(Importe Monto total Contrato)':       'monto_contrato',
-        'Fecha de finalización - Año':             'anio_fin',
     })
-    df_ariba.columns = df_ariba.columns.astype(str)
+    
+    # Limpiar espacios en textos clave
+    if 'comprador_estrategico' in df_ariba.columns:
+        df_ariba['comprador_estrategico'] = df_ariba['comprador_estrategico'].astype(str).str.strip()
+    if 'proveedor' in df_ariba.columns:
+        df_ariba['proveedor'] = df_ariba['proveedor'].astype(str).str.strip()
 
     # ── 2. Cargar Consolidado de Contratos (datos complementarios) ───────────
     hoja_consol = next((h for h in ['Consolidado de Contratos', 'Antiguo'] if h in sheets), None)
     if hoja_consol:
         df_consol = sheets[hoja_consol].dropna(how='all').dropna(axis=1, how='all').copy()
-        # Normalizar columna Estado que tiene doble espacio
-        df_consol.columns = [' '.join(c.split()) for c in df_consol.columns.astype(str)]
+        # Normalizar columna Estado que puede tener doble espacio
+        df_consol.columns = [' '.join(str(c).split()) for c in df_consol.columns.astype(str)]
+        
         df_consol = df_consol.rename(columns={
             'Contrato Ariba':        'contrato_ariba',
             'Área':                  'area',
             'Gerencia':              'gerencia',
             'Planta':                'planta',
             'Comprador Táctico':     'comprador_tactico',
-            'Comprador Estratégico': 'comprador_estrategico_consol',
             'Monto Garantía':        'monto_garantia',
             'Vencimiento Garantía':  'vencimiento_garantia',
             'Tipo Garantía':         'tipo_garantia',
             'N° Garantia':           'n_garantia',
             'Moneda Garantía':       'moneda_garantia',
             'Aplica Boleta de Garantía (Ariba)': 'boleta_ariba',
-            'Aplica Boleta de Garantía (Contrato firmado)': 'boleta_contrato',
             'Administrador de Contrato': 'administrador_contrato',
             'Correo Electrónico':    'correo',
             'Ingresa a Planta':      'ingresa_planta',
             'Contratos Indefinidos': 'contratos_indefinidos',
         })
+        
         cols_merge = [c for c in [
             'contrato_ariba', 'area', 'gerencia', 'planta',
             'comprador_tactico', 'monto_garantia', 'vencimiento_garantia',
             'tipo_garantia', 'n_garantia', 'moneda_garantia',
-            'boleta_ariba', 'boleta_contrato', 'administrador_contrato',
+            'boleta_ariba', 'administrador_contrato',
             'correo', 'ingresa_planta', 'contratos_indefinidos'
         ] if c in df_consol.columns]
+        
+        # Merge left para mantener todos los de Ariba aunque no tengan consolidado
         df = df_ariba.merge(df_consol[cols_merge], on='contrato_ariba', how='left')
     else:
         df = df_ariba.copy()
@@ -216,8 +262,10 @@ def cargar_y_procesar_contratos(file_hash: str, file_content: bytes) -> Tuple[pd
         raw = str(row.get('es_indefinido_raw', '')).strip().lower()
         if raw in ['sí', 'si', 'yes', '1', 'true', 'indefinido']:
             return True
+        # Chequeo por fecha lejana
         if pd.notna(row.get('fecha_termino')) and row['fecha_termino'].year > 2100:
             return True
+        # Chequeo por columna consolidado
         if pd.notna(row.get('contratos_indefinidos')):
             v = str(row['contratos_indefinidos']).strip().lower()
             if v in ['sí', 'si', 'yes', 'indefinido']:
@@ -240,7 +288,7 @@ def cargar_y_procesar_contratos(file_hash: str, file_content: bytes) -> Tuple[pd
     if 'monto_garantia' in df.columns:
         df['monto_garantia_num'] = df['monto_garantia'].apply(limpiar_monto)
 
-    # Limpiar comprador (quitar filas sin contrato)
+    # Limpiar comprador (quitar filas sin contrato ID válido)
     df = df[df['contrato_ariba'].notna() & (df['contrato_ariba'].astype(str).str.strip() != '')]
 
     # Reporte calidad
@@ -249,7 +297,6 @@ def cargar_y_procesar_contratos(file_hash: str, file_content: bytes) -> Tuple[pd
         'contratos_totales': len(df),
         'sin_fecha_termino': int(df['fecha_termino'].isna().sum()),
         'sin_proveedor': int(df['proveedor'].isna().sum()),
-        'sin_area': int(df['area'].isna().sum()) if 'area' in df.columns else 'N/A',
         'compradores_unicos': df['comprador_estrategico'].nunique(),
     }
 
@@ -346,16 +393,6 @@ with st.sidebar:
 
 if not uploaded_file:
     st.info("👆 Sube el archivo **Consolidado_de_Contratos.xlsx** para comenzar.")
-    st.markdown("""
-    ### ¿Qué verás en este dashboard?
-    - 🔴 **Alertas de contratos vencidos y por vencer**
-    - 📊 **KPIs de riesgo spot** por gerencia, área y comprador
-    - 🔍 **Análisis de boletas de garantía**
-    - 📥 **Exportación filtrada** lista para reportes
-
-    > **Fuente principal:** hoja `Info Ariba` (datos directos del sistema Ariba)
-    > Complementado con `Consolidado de Contratos` para Gerencia, Área, Planta y Garantías.
-    """)
     st.stop()
 
 if uploaded_file.size > MAX_FILE_SIZE_BYTES:
@@ -378,18 +415,8 @@ if df.empty:
     st.stop()
 
 # ==============================
-# 🎛️ FILTROS CORREGIDOS
+# 🎛️ FILTROS EN SIDEBAR
 # ==============================
-
-# 1. Limpieza previa: Rellenar nulos con "Sin Dato" para evitar errores de ordenamiento
-cols_clave = ['gerencia', 'área', 'comprador_estrategico', 'planta', 'riesgo_spot']
-for col in cols_clave:
-    if col in df.columns:
-        # Rellenamos NaN con un string visible y limpiamos espacios
-        df[col] = df[col].fillna("Sin Dato").astype(str).str.strip()
-
-# Copiamos el dataframe limpio para filtrar
-df_f = df.copy()
 
 with st.sidebar:
     st.header("🎛️ Filtros")
@@ -399,66 +426,50 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
 
-    st.divider()
+    estados = ['Todos'] + sorted(df['riesgo_spot'].dropna().unique().tolist())
+    riesgo_sel = st.selectbox("Riesgo Spot", estados)
 
-    # --- FILTRO COMPRADOR ESTRATÉGICO ---
-    comprador_sel = 'Todos'
-    if 'comprador_estrategico' in df_f.columns:
-        compradores = sorted(df_f['comprador_estrategico'].unique().tolist())
-        compradores.insert(0, 'Todos')
-        comprador_sel = st.selectbox("👤 Comprador Estratégico", compradores, index=0)
-        
-        # Buscador parcial por si el nombre varía
-        search_comprador = st.text_input("🔎 Buscar nombre parcial", placeholder="Ej: Jorge, Juan...")
+    # ── Comprador: usa 'comprador_estrategico' de Info Ariba ─────────────────
+    compradores = ['Todos'] + sorted(df['comprador_estrategico'].dropna().unique().astype(str).tolist())
+    comprador_sel = st.selectbox("Comprador (propietario Ariba)", compradores)
 
-    st.divider()
+    if 'gerencia' in df.columns:
+        gerencias = ['Todas'] + sorted(df['gerencia'].dropna().unique().astype(str).tolist())
+        gerencia_sel = st.selectbox("Gerencia", gerencias)
+    else:
+        gerencia_sel = 'Todas'
 
-    # --- OTROS FILTROS ---
-    estados = sorted(df_f['riesgo_spot'].unique().tolist()) if 'riesgo_spot' in df_f.columns else []
-    estados.insert(0, 'Todos')
-    riesgo_sel = st.selectbox("Riesgo Spot", estados, index=0)
+    if 'area' in df.columns:
+        areas = ['Todas'] + sorted(df['area'].dropna().unique().astype(str).tolist())
+        area_sel = st.selectbox("Área", areas)
+    else:
+        area_sel = 'Todas'
 
-    gerencia_sel = 'Todas'
-    if 'gerencia' in df_f.columns:
-        gerencias = sorted(df_f['gerencia'].unique().tolist())
-        gerencias.insert(0, 'Todas')
-        gerencia_sel = st.selectbox("Gerencia", gerencias, index=0)
+    if 'planta' in df.columns:
+        plantas = ['Todas'] + sorted(df['planta'].dropna().unique().astype(str).tolist())
+        planta_sel = st.selectbox("Planta", plantas)
+    else:
+        planta_sel = 'Todas'
 
-    area_sel = 'Todas'
-    if 'área' in df_f.columns:
-        areas = sorted(df_f['área'].unique().tolist())
-        areas.insert(0, 'Todas')
-        area_sel = st.selectbox("Área", areas, index=0)
-        
-    planta_sel = 'Todas'
-    if 'planta' in df_f.columns:
-        plantas = sorted(df_f['planta'].unique().tolist())
-        plantas.insert(0, 'Todas')
-        planta_sel = st.selectbox("Planta", plantas, index=0)
+    estados_contrato = ['Todos'] + sorted(df['estado_contrato'].dropna().unique().astype(str).tolist())
+    estado_sel = st.selectbox("Estado Contrato (Ariba)", estados_contrato)
 
-# ==============================
-# APLICACIÓN DE FILTROS
-# ==============================
-
+# ── Aplicar filtros ─────────────────────────────────────────────────────────
+df_f = df.copy()
 if riesgo_sel != 'Todos':
     df_f = df_f[df_f['riesgo_spot'] == riesgo_sel]
-if gerencia_sel != 'Todas':
+if comprador_sel != 'Todos':
+    df_f = df_f[df_f['comprador_estrategico'] == comprador_sel]
+if gerencia_sel != 'Todas' and 'gerencia' in df_f.columns:
     df_f = df_f[df_f['gerencia'] == gerencia_sel]
-if area_sel != 'Todas':
-    df_f = df_f[df_f['área'] == area_sel]
-if planta_sel != 'Todas':
-    df_f = df_f[df_f['planta'] == planta_sel]
+if area_sel != 'Todas' and 'area' in df_f.columns:
+    df_f = df_f[df_f['area'] == area_sel]
+if planta_sel != 'Todas' and 'planta' in df_f.columns:
+    df_f = df_f[df_f['planta'].astype(str).str.contains(planta_sel, na=False)]
+if estado_sel != 'Todos':
+    df_f = df_f[df_f['estado_contrato'] == estado_sel]
 
-# Filtro inteligente de comprador
-if 'comprador_estrategico' in df_f.columns:
-    if comprador_sel != 'Todos':
-        df_f = df_f[df_f['comprador_estrategico'] == comprador_sel]
-    
-    if 'search_comprador' in locals() and search_comprador:
-        mask = df_f['comprador_estrategico'].str.contains(search_comprador, case=False, na=False)
-        df_f = df_f[mask]
-
-st.info(f"📊 Mostrando **{len(df_f)}** contratos.")
+# ==============================
 # 📊 KPIs Y GRÁFICOS
 # ==============================
 
@@ -746,3 +757,4 @@ REGLAS:
         st.error(f"Error de configuración Gemini: {str(e)}")
 else:
     st.info("👈 Ingresa tu API Key de Gemini para activar el asistente.")
+```
