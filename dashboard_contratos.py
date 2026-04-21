@@ -397,6 +397,103 @@ if df.empty:
     st.stop()
 
 # ==============================
+# 🎛️ FILTROS EN SIDEBAR (ACTUALIZADO)
+# ==============================
+
+with st.sidebar:
+    st.header("🎛️ Filtros")
+    
+    # Botón para limpiar filtros
+    if st.button("🔄 Limpiar Filtros"):
+        st.session_state.clear()
+        st.rerun()
+
+    st.divider()
+
+    # ── Filtros de Riesgo y Estado ────────────────────────────────────────
+    estados = ['Todos'] + sorted(df['riesgo_spot'].dropna().unique().tolist())
+    riesgo_sel = st.selectbox("Riesgo Spot", estados)
+
+    estados_contrato = ['Todos'] + sorted(df['estado_contrato'].dropna().unique().astype(str).tolist())
+    estado_sel = st.selectbox("Estado Contrato (Ariba)", estados_contrato)
+
+    st.divider()
+
+    # ── FILTROS DE COMPRADORES (Doble opción: Ariba + Consolidado) ─────────
+    
+    # 1. Comprador desde Info Ariba (fuente principal)
+    comprador_ariba_sel = 'Todos'
+    if 'comprador_estrategico' in df.columns:
+        compradores_ariba = ['Todos'] + sorted(df['comprador_estrategico'].dropna().unique().astype(str).tolist())
+        comprador_ariba_sel = st.selectbox("👤 Comprador (Info Ariba)", compradores_ariba)
+
+    # 2. Comprador desde Consolidado de Contratos (fuente complementaria)
+    comprador_consol_sel = 'Todos'
+    if 'comprador_estrategico_consol' in df.columns:
+        # Limpiar valores nulos y duplicados para el filtro
+        valores_consol = df['comprador_estrategico_consol'].dropna().astype(str).str.strip()
+        valores_consol = valores_consol[valores_consol != 'nan']  # Eliminar strings 'nan'
+        compradores_consol = ['Todos'] + sorted(valores_consol.unique().tolist())
+        comprador_consol_sel = st.selectbox("👤 Comprador (Consolidado)", compradores_consol)
+
+    st.divider()
+
+    # ── Filtros organizacionales ──────────────────────────────────────────
+    if 'gerencia' in df.columns:
+        gerencias = ['Todas'] + sorted(df['gerencia'].dropna().unique().astype(str).tolist())
+        gerencia_sel = st.selectbox("Gerencia", gerencias)
+    else:
+        gerencia_sel = 'Todas'
+
+    if 'area' in df.columns:
+        areas = ['Todas'] + sorted(df['area'].dropna().unique().astype(str).tolist())
+        area_sel = st.selectbox("Área", areas)
+    else:
+        area_sel = 'Todas'
+        
+    if 'planta' in df.columns:
+        plantas = ['Todas'] + sorted(df['planta'].dropna().unique().astype(str).tolist())
+        planta_sel = st.selectbox("Planta", plantas)
+    else:
+        planta_sel = 'Todas'
+
+# ==============================
+# APLICACIÓN DE FILTROS LÓGICOS
+# ==============================
+
+df_f = df.copy()
+
+# Filtros básicos
+if riesgo_sel != 'Todos':
+    df_f = df_f[df_f['riesgo_spot'] == riesgo_sel]
+if estado_sel != 'Todos':
+    df_f = df_f[df_f['estado_contrato'] == estado_sel]
+if gerencia_sel != 'Todas' and 'gerencia' in df_f.columns:
+    df_f = df_f[df_f['gerencia'] == gerencia_sel]
+if area_sel != 'Todas' and 'area' in df_f.columns:
+    df_f = df_f[df_f['area'] == area_sel]
+if planta_sel != 'Todas' and 'planta' in df_f.columns:
+    df_f = df_f[df_f['planta'].astype(str).str.contains(planta_sel, na=False)]
+
+# ── Filtros de Comprador (lógica OR: muestra si coincide en Ariba O en Consolidado) ──
+if 'comprador_estrategico' in df_f.columns and comprador_ariba_sel != 'Todos':
+    df_f = df_f[df_f['comprador_estrategico'] == comprador_ariba_sel]
+    
+if 'comprador_estrategico_consol' in df_f.columns and comprador_consol_sel != 'Todos':
+    df_f = df_f[df_f['comprador_estrategico_consol'] == comprador_consol_sel]
+
+# Info visual de filtros activos
+filtros_activos = []
+if comprador_ariba_sel != 'Todos':
+    filtros_activos.append(f"Ariba: {comprador_ariba_sel}")
+if comprador_consol_sel != 'Todos':
+    filtros_activos.append(f"Consolidado: {comprador_consol_sel}")
+if filtros_activos:
+    st.sidebar.caption(f"🔍 Filtros comprador: {', '.join(filtros_activos)}")
+
+st.info(f"📊 Mostrando **{len(df_f)}** contratos filtrados.")
+
+# ==============================
 # 🎛️ FILTROS EN SIDEBAR
 # ==============================
 
