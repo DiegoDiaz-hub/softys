@@ -9,7 +9,7 @@ Además, en la sección de filtros, usas `df['comprador_estrategico']`. Si el ar
 He ajustado la función `cargar_y_procesar_contratos` para ser más tolerante a estos cambios.
 
 ### 2. Manejo de Errores en Fechas "Raras"
-Tu función `parse_fecha` es buena, pero los formatos como `30"-"09"-"2025` (con comillas) a veces dan error si no se limpian bien antes. He añadido una limpieza extra.
+### Tu función `parse_fecha` es buena, pero los formatos como `30"-"09"-"2025` (con comillas) a veces dan error si no se limpian bien antes. He añadido una limpieza extra.
 
 ### 3. Optimización del Filtro de Comprador
 Para evitar que el usuario no encuentre sus contratos por un espacio en blanco al final del nombre, he añadido `.str.strip()` en la carga de datos.
