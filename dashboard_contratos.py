@@ -66,16 +66,26 @@ st.markdown("""
 # 🛡️ CONSTANTES
 # ==============================
 MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024
-HOJA_PRINCIPAL = "Antiguo"
 DIAS_ALERTA_VENCIMIENTO = 30
 
 # ==============================
 # 🔧 FUNCIONES BACKEND
 # ==============================
 
-def parse_fecha_softys(valor) -> pd.Timestamp:
-    if pd.isna(valor) or valor in ['99.99.9999', '2999', '31/12/2999', 'Indefinido', '']:
+def parse_fecha(valor) -> pd.Timestamp:
+    """Parser robusto de fechas para múltiples formatos."""
+    if pd.isna(valor) or str(valor).strip() in ['99.99.9999', '2999', '31/12/2999', 'Indefinido', '']:
         return pd.NaT
+    # Si ya es Timestamp, devolverlo directo
+    if isinstance(valor, pd.Timestamp):
+        return valor if valor.year < 2900 else pd.NaT
+    # Si es número (fecha serial de Excel)
+    if isinstance(valor, (int, float)):
+        try:
+            ts = pd.Timestamp('1899-12-30') + pd.Timedelta(days=int(valor))
+            return ts if ts.year < 2900 else pd.NaT
+        except:
+            return pd.NaT
     valor_str = str(valor).strip()
     valor_limpio = valor_str.replace('"-"', '-').replace('/', '-').replace('.', '-')
     formatos = ['%d-%m-%Y', '%d/%m/%Y', '%m/%d/%Y', '%Y-%m-%d', '%d-%m-%y', '%m/%d/%y']
@@ -84,7 +94,11 @@ def parse_fecha_softys(valor) -> pd.Timestamp:
             return pd.to_datetime(valor_limpio, format=fmt, dayfirst=True)
         except:
             continue
-    return pd.to_datetime(valor_limpio, errors='coerce', dayfirst=True)
+    try:
+        ts = pd.to_datetime(valor_limpio, errors='coerce', dayfirst=True)
+        return ts if pd.notna(ts) and ts.year < 2900 else pd.NaT
+    except:
+        return pd.NaT
 
 def limpiar_monto(valor) -> float:
     if pd.isna(valor):
@@ -95,168 +109,238 @@ def limpiar_monto(valor) -> float:
     except:
         return 0.0
 
-def clasificar_riesgo_contrato(estado_ariba: str, dias_restantes: int, es_indefinido: bool = False) -> str:
-    estados_bajos = ['Vigente', 'Publicado', 'En revisión', 'Aprobado']
-    estados_medios = ['Próximo a vencer', 'Por vencer', 'En modificación']
-    estados_altos = ['Vencido', 'Cancelado', 'Terminado']
-    estados_revisar = ['Borrador', 'Modificación del borrador', 'En espera']
-    
-    if es_indefinido or estado_ariba in estados_bajos:
-        return 'BAJO 🟢'
-    if estado_ariba in estados_revisar:
-        return 'REVISAR ⚪'
-    if dias_restantes < 0 or estado_ariba in estados_altos:
-        return 'ALTO 🔴'
-    if dias_restantes <= 30 or estado_ariba in estados_medios:
-        return 'MEDIO 🟡'
-    return 'BAJO 🟢'
+def clasificar_riesgo_contrato(estado: str, dias_restantes, es_indefinido: bool = False) -> str:
+    estados_bajos   = ['Publicado', 'En revisión', 'Aprobado']
+    estados_medios  = ['Próximo a vencer', 'Por vencer', 'En modificación', 'Modificación del borrador']
+    estados_altos   = ['Vencido', 'Cancelado', 'Terminado']
+    estados_revisar = ['Borrador', 'En espera']
 
-def validar_calidad_datos(df: pd.DataFrame) -> Dict[str, any]:
-    reporte = {
-        'filas_totales': len(df),
-        'contratos_sin_rut': df['Rut'].isna().sum() if 'Rut' in df.columns else 0,
-        'contratos_sin_proveedor': df['Proveedor'].isna().sum() if 'Proveedor' in df.columns else 0,
-        'fechas_invalidas': 0,
-        'montos_anomalos': 0
-    }
-    for col in ['Fecha Inicio', 'Fecha Término Contrato', 'Vencimiento Garantía']:
-        if col in df.columns:
-            fechas = df[col].apply(parse_fecha_softys)
-            reporte['fechas_invalidas'] += fechas.isna().sum()
-    if 'Monto Garantía' in df.columns:
-        montos = df['Monto Garantía'].apply(limpiar_monto)
-        reporte['montos_anomalos'] = ((montos < 0) | (montos > 1_000_000_000)).sum()
-    return reporte
+    if es_indefinido:
+        return 'BAJO 🟢'
+    if pd.isna(dias_restantes):
+        return 'REVISAR ⚪'
+    dias = int(dias_restantes)
+    if estado in estados_altos or dias < 0:
+        return 'ALTO 🔴'
+    if estado in estados_medios or dias <= 30:
+        return 'MEDIO 🟡'
+    if estado in estados_revisar:
+        return 'REVISAR ⚪'
+    if estado in estados_bajos or dias > 30:
+        return 'BAJO 🟢'
+    return 'REVISAR ⚪'
 
 @st.cache_data(show_spinner=False)
-def cargar_y_procesar_contratos(file_hash: str, file_content: bytes) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict]:
+def cargar_y_procesar_contratos(file_hash: str, file_content: bytes) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
     sheets = pd.read_excel(BytesIO(file_content), sheet_name=None, engine='openpyxl')
-    hoja_principal = HOJA_PRINCIPAL if HOJA_PRINCIPAL in sheets.keys() else list(sheets.keys())[0]
-    df_consolidado = sheets.get(hoja_principal, pd.DataFrame()).dropna(how='all').dropna(axis=1, how='all')
-    df_bg = sheets.get('BG', pd.DataFrame()) if 'BG' in sheets.keys() else pd.DataFrame()
-    df_ariba = sheets.get('Info Ariba', pd.DataFrame()) if 'Info Ariba' in sheets.keys() else pd.DataFrame()
-    
-    if not df_bg.empty:
-        df_bg = df_bg.dropna(how='all').dropna(axis=1, how='all')
+
+    # ── 1. Cargar Info Ariba (fuente principal) ──────────────────────────────
+    if 'Info Ariba' not in sheets:
+        raise ValueError("No se encontró la hoja 'Info Ariba' en el archivo.")
+    df_ariba = sheets['Info Ariba'].dropna(how='all').dropna(axis=1, how='all').copy()
+    df_ariba = df_ariba.rename(columns={
+        'ID de contrato':                          'contrato_ariba',
+        'Proyecto - Nombre del proyecto':          'descripcion',
+        'Nombre del propietario':                  'comprador_estrategico',
+        'Partes afectadas - Proveedor común':      'proveedor',
+        'Rut empresa proveedor':                   'rut',
+        'Código acreedor SAP':                     'cod_sap',
+        'Es Indefinido':                           'es_indefinido_raw',
+        'Región - Región (L2)':                    'region',
+        'Fecha de entrada en vigor - Fecha':       'fecha_inicio',
+        'Fecha de expiración - Fecha':             'fecha_termino',
+        'Fecha de inicio':                         'fecha_inicio_alt',
+        'Estado del contrato':                     'estado_contrato',
+        'Aplica Garantía':                         'aplica_garantia',
+        'sum(Importe Monto total Contrato)':       'monto_contrato',
+        'Fecha de finalización - Año':             'anio_fin',
+    })
+    df_ariba.columns = df_ariba.columns.astype(str)
+
+    # ── 2. Cargar Consolidado de Contratos (datos complementarios) ───────────
+    hoja_consol = next((h for h in ['Consolidado de Contratos', 'Antiguo'] if h in sheets), None)
+    if hoja_consol:
+        df_consol = sheets[hoja_consol].dropna(how='all').dropna(axis=1, how='all').copy()
+        # Normalizar columna Estado que tiene doble espacio
+        df_consol.columns = [' '.join(c.split()) for c in df_consol.columns.astype(str)]
+        df_consol = df_consol.rename(columns={
+            'Contrato Ariba':        'contrato_ariba',
+            'Área':                  'area',
+            'Gerencia':              'gerencia',
+            'Planta':                'planta',
+            'Comprador Táctico':     'comprador_tactico',
+            'Comprador Estratégico': 'comprador_estrategico_consol',
+            'Monto Garantía':        'monto_garantia',
+            'Vencimiento Garantía':  'vencimiento_garantia',
+            'Tipo Garantía':         'tipo_garantia',
+            'N° Garantia':           'n_garantia',
+            'Moneda Garantía':       'moneda_garantia',
+            'Aplica Boleta de Garantía (Ariba)': 'boleta_ariba',
+            'Aplica Boleta de Garantía (Contrato firmado)': 'boleta_contrato',
+            'Administrador de Contrato': 'administrador_contrato',
+            'Correo Electrónico':    'correo',
+            'Ingresa a Planta':      'ingresa_planta',
+            'Contratos Indefinidos': 'contratos_indefinidos',
+        })
+        cols_merge = [c for c in [
+            'contrato_ariba', 'area', 'gerencia', 'planta',
+            'comprador_tactico', 'monto_garantia', 'vencimiento_garantia',
+            'tipo_garantia', 'n_garantia', 'moneda_garantia',
+            'boleta_ariba', 'boleta_contrato', 'administrador_contrato',
+            'correo', 'ingresa_planta', 'contratos_indefinidos'
+        ] if c in df_consol.columns]
+        df = df_ariba.merge(df_consol[cols_merge], on='contrato_ariba', how='left')
+    else:
+        df = df_ariba.copy()
+
+    # ── 3. Cargar hoja BG ────────────────────────────────────────────────────
+    df_bg = pd.DataFrame()
+    if 'BG' in sheets:
+        df_bg = sheets['BG'].dropna(how='all').dropna(axis=1, how='all').copy()
         df_bg.columns = df_bg.columns.astype(str).str.strip().str.lower().str.replace(' ', '_').str.replace('-', '_')
-    if not df_ariba.empty:
-        df_ariba = df_ariba.dropna(how='all').dropna(axis=1, how='all')
-    
-    df = df_consolidado.copy()
+
+    # ── 4. Procesar campos ───────────────────────────────────────────────────
     hoy = pd.Timestamp.today().normalize()
-    df.columns = df.columns.astype(str).str.strip().str.lower().str.replace(' ', '_').str.replace('-', '_')
-    
-    fecha_cols = [c for c in df.columns if 'fecha' in c or 'término' in c or 'vencimiento' in c]
-    for col in fecha_cols:
-        df[col] = df[col].apply(parse_fecha_softys)
-    
-    col_termino = 'fecha_término_contrato' if 'fecha_término_contrato' in df.columns else 'fecha_termino_contrato'
-    if col_termino in df.columns:
-        df['dias_para_vencimiento'] = (df[col_termino] - hoy).dt.days
-    
-    df['es_indefinido'] = df.get('contratos_indefinidos', '').str.lower().isin(['sí', 'si', 'yes', 'indefinido']) | \
-                         (df.get('estado_contrato', '').str.lower() == 'indefinido') | \
-                         (df[col_termino].dt.year > 2100 if pd.api.types.is_datetime64_any_dtype(df[col_termino]) else False)
-    
-    if 'estado_contrato_ariba' in df.columns and 'dias_para_vencimiento' in df.columns:
-        df['riesgo_spot'] = df.apply(
-            lambda row: clasificar_riesgo_contrato(
-                row.get('estado_contrato_ariba', ''),
-                row.get('dias_para_vencimiento', 999),
-                row.get('es_indefinido', False)
-            ), axis=1
-        )
-    
-    if 'monto_garantía' in df.columns:
-        df['monto_garantia_clp'] = df['monto_garantía'].apply(limpiar_monto)
-    
-    reporte_calidad = validar_calidad_datos(df)
-    
-    if 'contrato_ariba' in df.columns:
-        df = df[df['contrato_ariba'].notna() & (df['contrato_ariba'].astype(str).str.strip() != '')]
-    
-    return df, df_bg, df_ariba, reporte_calidad
+
+    # Fechas
+    df['fecha_termino']  = df['fecha_termino'].apply(parse_fecha)
+    df['fecha_inicio']   = df['fecha_inicio'].apply(parse_fecha)
+    if 'vencimiento_garantia' in df.columns:
+        df['vencimiento_garantia'] = df['vencimiento_garantia'].apply(parse_fecha)
+
+    # Días para vencimiento
+    df['dias_para_vencimiento'] = (df['fecha_termino'] - hoy).dt.days
+
+    # Es indefinido
+    def es_indef(row):
+        raw = str(row.get('es_indefinido_raw', '')).strip().lower()
+        if raw in ['sí', 'si', 'yes', '1', 'true', 'indefinido']:
+            return True
+        if pd.notna(row.get('fecha_termino')) and row['fecha_termino'].year > 2100:
+            return True
+        if pd.notna(row.get('contratos_indefinidos')):
+            v = str(row['contratos_indefinidos']).strip().lower()
+            if v in ['sí', 'si', 'yes', 'indefinido']:
+                return True
+        return False
+    df['es_indefinido'] = df.apply(es_indef, axis=1)
+
+    # Riesgo spot
+    df['riesgo_spot'] = df.apply(
+        lambda r: clasificar_riesgo_contrato(
+            str(r.get('estado_contrato', '')),
+            r.get('dias_para_vencimiento'),
+            r.get('es_indefinido', False)
+        ), axis=1
+    )
+
+    # Monto
+    if 'monto_contrato' in df.columns:
+        df['monto_contrato_num'] = pd.to_numeric(df['monto_contrato'], errors='coerce').fillna(0)
+    if 'monto_garantia' in df.columns:
+        df['monto_garantia_num'] = df['monto_garantia'].apply(limpiar_monto)
+
+    # Limpiar comprador (quitar filas sin contrato)
+    df = df[df['contrato_ariba'].notna() & (df['contrato_ariba'].astype(str).str.strip() != '')]
+
+    # Reporte calidad
+    reporte = {
+        'fuente_principal': 'Info Ariba',
+        'contratos_totales': len(df),
+        'sin_fecha_termino': int(df['fecha_termino'].isna().sum()),
+        'sin_proveedor': int(df['proveedor'].isna().sum()),
+        'sin_area': int(df['area'].isna().sum()) if 'area' in df.columns else 'N/A',
+        'compradores_unicos': df['comprador_estrategico'].nunique(),
+    }
+
+    return df, df_bg, reporte
+
 
 # ==============================
 # 📊 FUNCIONES DE VISUALIZACIÓN
 # ==============================
 
 def crear_kpi_cards(df: pd.DataFrame) -> None:
-    total = len(df)
-    vigentes = len(df[df['riesgo_spot'] == 'BAJO 🟢']) if 'riesgo_spot' in df.columns else 0
-    por_vencer = len(df[df['riesgo_spot'] == 'MEDIO 🟡']) if 'riesgo_spot' in df.columns else 0
-    vencidos = len(df[df['riesgo_spot'] == 'ALTO 🔴']) if 'riesgo_spot' in df.columns else 0
-    revisar = len(df[df['riesgo_spot'] == 'REVISAR ⚪']) if 'riesgo_spot' in df.columns else 0
+    total     = len(df)
+    vigentes  = len(df[df['riesgo_spot'] == 'BAJO 🟢'])
+    por_vencer= len(df[df['riesgo_spot'] == 'MEDIO 🟡'])
+    vencidos  = len(df[df['riesgo_spot'] == 'ALTO 🔴'])
+    revisar   = len(df[df['riesgo_spot'] == 'REVISAR ⚪'])
     k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("📋 Total Contratos", f"{total:,}")
-    k2.metric("✅ Vigentes", f"{vigentes:,}", delta=f"{vigentes/total*100:.1f}%" if total else "0%")
+    k1.metric("📋 Total Contratos",    f"{total:,}")
+    k2.metric("✅ Vigentes",           f"{vigentes:,}",   delta=f"{vigentes/total*100:.1f}%" if total else "0%")
     k3.metric("⚠️ Por Vencer (≤30d)", f"{por_vencer:,}", delta_color="inverse")
-    k4.metric("🚨 Vencidos", f"{vencidos:,}", delta_color="inverse")
-    k5.metric("🔍 Revisar", f"{revisar}")
+    k4.metric("🚨 Vencidos",           f"{vencidos:,}",   delta_color="inverse")
+    k5.metric("🔍 Revisar",            f"{revisar:,}")
 
-def crear_grafico_estado_contratos(df: pd.DataFrame) -> go.Figure:
-    if 'riesgo_spot' not in df.columns or df.empty:
-        return None
+COLOR_MAP = {
+    'BAJO 🟢':    '#27ae60',
+    'MEDIO 🟡':   '#f39c12',
+    'ALTO 🔴':    '#e74c3c',
+    'REVISAR ⚪': '#95a5a6',
+}
+
+def crear_grafico_riesgo(df: pd.DataFrame) -> go.Figure:
     datos = df['riesgo_spot'].value_counts().reset_index()
     datos.columns = ['Riesgo', 'Cantidad']
-    colores = {'BAJO 🟢': '#27ae60', 'MEDIO 🟡': '#f39c12', 'ALTO 🔴': '#e74c3c', 'REVISAR ⚪': '#95a5a6'}
-    fig = px.pie(datos, values='Cantidad', names='Riesgo', color='Riesgo', color_discrete_map=colores, title="🎯 Distribución de Riesgo de Contratos", hole=0.4)
+    fig = px.pie(datos, values='Cantidad', names='Riesgo',
+                 color='Riesgo', color_discrete_map=COLOR_MAP,
+                 title="🎯 Distribución de Riesgo", hole=0.4)
     fig.update_traces(textinfo='percent+label')
     return fig
 
 def crear_timeline_vencimientos(df: pd.DataFrame) -> go.Figure:
-    if 'dias_para_vencimiento' not in df.columns or df.empty:
+    if 'dias_para_vencimiento' not in df.columns:
         return None
-    df_filtro = df[(df['dias_para_vencimiento'] >= -30) & (df['dias_para_vencimiento'] <= 90)].copy()
-    if df_filtro.empty:
+    df_f = df[(df['dias_para_vencimiento'] >= -30) & (df['dias_para_vencimiento'] <= 90)].copy()
+    df_f = df_f.dropna(subset=['fecha_termino'])
+    if df_f.empty:
         return None
-    col_termino = 'fecha_término_contrato' if 'fecha_término_contrato' in df_filtro.columns else 'fecha_termino_contrato'
-    if col_termino not in df_filtro.columns:
-        return None
-    df_filtro[col_termino] = pd.to_datetime(df_filtro[col_termino], errors='coerce')
-    df_filtro = df_filtro.dropna(subset=[col_termino])
-    if df_filtro.empty:
-        return None
-    df_filtro['mes_venc'] = df_filtro[col_termino].dt.to_period('M').astype(str)
-    df_agrupado = df_filtro.groupby('mes_venc').size().reset_index(name='Cantidad')
-    if df_agrupado.empty:
-        return None
-    fig = px.bar(df_agrupado, x='mes_venc', y='Cantidad', title="📅 Vencimientos Próximos (90 días)", color='Cantidad', color_continuous_scale='YlOrRd')
+    df_f['mes_venc'] = df_f['fecha_termino'].dt.to_period('M').astype(str)
+    agrup = df_f.groupby('mes_venc').size().reset_index(name='Cantidad')
+    fig = px.bar(agrup, x='mes_venc', y='Cantidad',
+                 title="📅 Vencimientos Próximos (90 días)",
+                 color='Cantidad', color_continuous_scale='YlOrRd')
     fig.update_layout(xaxis_title="Mes", yaxis_title="Contratos")
     return fig
 
 def crear_tabla_alertas(df: pd.DataFrame) -> pd.DataFrame:
+    mask_riesgo = df['riesgo_spot'].isin(['ALTO 🔴', 'MEDIO 🟡'])
+    mask_bg = pd.Series([False] * len(df), index=df.index)
+    if 'boleta_ariba' in df.columns:
+        mask_bg = df['boleta_ariba'].astype(str).str.lower().str.contains('sí|si|yes', na=False)
+
     alertas = []
-    col_bg = next((c for c in df.columns if 'boleta' in c and 'ariba' in c), None)
-    if col_bg:
-        mask_bg = df[col_bg].astype(str).str.lower().str.contains('sí|si|yes', na=False)
-    else:
-        mask_bg = pd.Series([False] * len(df), index=df.index)
-    mask = (df['riesgo_spot'].isin(['ALTO 🔴', 'MEDIO 🟡'])) & mask_bg
-    for _, row in df[mask].iterrows():
+    for _, row in df[mask_riesgo & mask_bg].iterrows():
         alertas.append({
-            'Contrato': row.get('contrato_ariba', 'N/A'),
-            'Proveedor': row.get('proveedor', 'N/A'),
-            'Riesgo': row.get('riesgo_spot', 'N/A'),
-            'Días Restantes': row.get('dias_para_vencimiento', 'N/A'),
-            'Monto Garantía': f"{row.get('monto_garantia_clp', 0):,.0f}",
-            'Comprador Táctico': row.get('comprador_táctico', 'N/A'),
-            'Acción': 'Renovar' if row.get('riesgo_spot') == 'MEDIO 🟡' else 'Regularizar'
+            'Contrato':          row.get('contrato_ariba', 'N/A'),
+            'Proveedor':         row.get('proveedor', 'N/A'),
+            'Comprador':         row.get('comprador_estrategico', 'N/A'),
+            'Riesgo':            row.get('riesgo_spot', 'N/A'),
+            'Días Restantes':    row.get('dias_para_vencimiento', 'N/A'),
+            'Estado Contrato':   row.get('estado_contrato', 'N/A'),
+            'Monto Garantía':    f"{row.get('monto_garantia_num', 0):,.0f}" if 'monto_garantia_num' in row else 'N/A',
+            'Acción':            'Renovar' if row.get('riesgo_spot') == 'MEDIO 🟡' else 'Regularizar',
         })
     return pd.DataFrame(alertas).sort_values('Días Restantes') if alertas else pd.DataFrame()
+
 
 # ==============================
 # 🎛️ INTERFAZ PRINCIPAL
 # ==============================
 
 st.title("📋 Dashboard de Gestión de Contratos")
-st.markdown("**Softys Chile** · Compras Estratégicas y Tácticas · Análisis de Riesgo Spot")
+st.markdown("**Softys Chile** · Compras Estratégicas y Tácticas · Fuente: Info Ariba")
 st.divider()
 
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/1/14/Softys_logo.svg/320px-Softys_logo.svg.png", use_container_width=True)
     st.header("📁 Carga de Archivo")
-    uploaded_file = st.file_uploader("Sube el Consolidado de Contratos (.xlsx)", type=['xlsx', 'xls'], help="Exportado desde SAP/Ariba. Debe contener la hoja 'Antiguo' o 'Consolidado de Contratos'.")
+    uploaded_file = st.file_uploader(
+        "Sube el Consolidado de Contratos (.xlsx)",
+        type=['xlsx', 'xls'],
+        help="Debe contener la hoja 'Info Ariba'."
+    )
     st.divider()
     st.caption("💡 El archivo se procesa localmente. Ningún dato sale de tu equipo.")
 
@@ -265,9 +349,12 @@ if not uploaded_file:
     st.markdown("""
     ### ¿Qué verás en este dashboard?
     - 🔴 **Alertas de contratos vencidos y por vencer**
-    - 📊 **KPIs de riesgo spot** por gerencia y área
+    - 📊 **KPIs de riesgo spot** por gerencia, área y comprador
     - 🔍 **Análisis de boletas de garantía**
     - 📥 **Exportación filtrada** lista para reportes
+
+    > **Fuente principal:** hoja `Info Ariba` (datos directos del sistema Ariba)
+    > Complementado con `Consolidado de Contratos` para Gerencia, Área, Planta y Garantías.
     """)
     st.stop()
 
@@ -280,56 +367,65 @@ content = uploaded_file.read()
 h = hashlib.md5(content).hexdigest()
 
 try:
-    with st.spinner("🔄 Procesando contratos con parser robusto..."):
-        df, df_bg, df_ariba, reporte_calidad = cargar_y_procesar_contratos(h, content)
+    with st.spinner("🔄 Procesando datos desde Info Ariba..."):
+        df, df_bg, reporte_calidad = cargar_y_procesar_contratos(h, content)
 except Exception as e:
     st.error(f"❌ Error al procesar el archivo: {str(e)}")
     st.stop()
 
 if df.empty:
-    st.error("❌ No se encontraron contratos válidos. Verifica el archivo.")
+    st.error("❌ No se encontraron contratos válidos en la hoja 'Info Ariba'.")
     st.stop()
 
 # ==============================
-# 🎛️ FILTROS
+# 🎛️ FILTROS EN SIDEBAR
 # ==============================
 
 with st.sidebar:
     st.header("🎛️ Filtros")
-    estados = ['Todos'] + sorted(df['riesgo_spot'].unique().tolist()) if 'riesgo_spot' in df.columns else ['Todos']
+
+    estados = ['Todos'] + sorted(df['riesgo_spot'].dropna().unique().tolist())
     riesgo_sel = st.selectbox("Riesgo Spot", estados)
+
+    # ── Comprador: usa 'comprador_estrategico' de Info Ariba ─────────────────
+    compradores = ['Todos'] + sorted(df['comprador_estrategico'].dropna().unique().astype(str).tolist())
+    comprador_sel = st.selectbox("Comprador (propietario Ariba)", compradores)
+
     if 'gerencia' in df.columns:
         gerencias = ['Todas'] + sorted(df['gerencia'].dropna().unique().astype(str).tolist())
         gerencia_sel = st.selectbox("Gerencia", gerencias)
     else:
         gerencia_sel = 'Todas'
-    if 'área' in df.columns:
-        areas = ['Todas'] + sorted(df['área'].dropna().unique().astype(str).tolist())
+
+    if 'area' in df.columns:
+        areas = ['Todas'] + sorted(df['area'].dropna().unique().astype(str).tolist())
         area_sel = st.selectbox("Área", areas)
     else:
         area_sel = 'Todas'
-    if 'comprador_estratégico' in df.columns:
-        compradores = ['Todos'] + sorted(df['comprador_estratégico'].dropna().unique().astype(str).tolist())
-        comprador_sel = st.selectbox("Comprador Estratégico", compradores)
-    else:
-        comprador_sel = 'Todos'
+
     if 'planta' in df.columns:
         plantas = ['Todas'] + sorted(df['planta'].dropna().unique().astype(str).tolist())
         planta_sel = st.selectbox("Planta", plantas)
     else:
         planta_sel = 'Todas'
 
+    estados_contrato = ['Todos'] + sorted(df['estado_contrato'].dropna().unique().astype(str).tolist())
+    estado_sel = st.selectbox("Estado Contrato (Ariba)", estados_contrato)
+
+# ── Aplicar filtros ─────────────────────────────────────────────────────────
 df_f = df.copy()
-if riesgo_sel != 'Todos' and 'riesgo_spot' in df_f.columns:
+if riesgo_sel != 'Todos':
     df_f = df_f[df_f['riesgo_spot'] == riesgo_sel]
+if comprador_sel != 'Todos':
+    df_f = df_f[df_f['comprador_estrategico'] == comprador_sel]
 if gerencia_sel != 'Todas' and 'gerencia' in df_f.columns:
     df_f = df_f[df_f['gerencia'] == gerencia_sel]
-if area_sel != 'Todas' and 'área' in df_f.columns:
-    df_f = df_f[df_f['área'] == area_sel]
-if comprador_sel != 'Todos' and 'comprador_estratégico' in df_f.columns:
-    df_f = df_f[df_f['comprador_estratégico'] == comprador_sel]
+if area_sel != 'Todas' and 'area' in df_f.columns:
+    df_f = df_f[df_f['area'] == area_sel]
 if planta_sel != 'Todas' and 'planta' in df_f.columns:
-    df_f = df_f[df_f['planta'].str.contains(planta_sel, na=False)]
+    df_f = df_f[df_f['planta'].astype(str).str.contains(planta_sel, na=False)]
+if estado_sel != 'Todos':
+    df_f = df_f[df_f['estado_contrato'] == estado_sel]
 
 # ==============================
 # 📊 KPIs Y GRÁFICOS
@@ -337,18 +433,17 @@ if planta_sel != 'Todas' and 'planta' in df_f.columns:
 
 st.subheader("📊 Resumen Ejecutivo")
 crear_kpi_cards(df_f)
+
 col_graf1, col_graf2 = st.columns(2)
 with col_graf1:
-    fig_estado = crear_grafico_estado_contratos(df_f)
-    if fig_estado:
-        st.plotly_chart(fig_estado, use_container_width=True)
+    st.plotly_chart(crear_grafico_riesgo(df_f), use_container_width=True)
 with col_graf2:
-    fig_timeline = crear_timeline_vencimientos(df_f)
-    if fig_timeline:
-        st.plotly_chart(fig_timeline, use_container_width=True)
+    fig_tl = crear_timeline_vencimientos(df_f)
+    if fig_tl:
+        st.plotly_chart(fig_tl, use_container_width=True)
 
 # ==============================
-# 🚨 ALERTAS - ✅ CORREGIDO
+# 🚨 ALERTAS
 # ==============================
 
 st.subheader("🚨 Alertas de Acción Inmediata")
@@ -356,23 +451,16 @@ df_alertas = crear_tabla_alertas(df_f)
 
 if not df_alertas.empty:
     def highlight_risk(val):
-        if pd.isna(val):
-            return ''
-        if 'ALTO' in str(val):
-            return 'background-color: #fef2f2'
-        if 'MEDIO' in str(val):
-            return 'background-color: #fffbeb'
+        if 'ALTO'  in str(val): return 'background-color: #fef2f2'
+        if 'MEDIO' in str(val): return 'background-color: #fffbeb'
         return ''
-    styled_alertas = df_alertas.style.map(highlight_risk, subset=['Riesgo'])
-    st.dataframe(styled_alertas, use_container_width=True)
-    st.info(f"""
-    💡 **Impacto estimado**: 
-    - {len(df_alertas)} contratos requieren acción inmediata
-    - Ahorro potencial: ~15% sobre montos en riesgo (compras spot vs contrato)
-    - Tiempo ahorrado: ~2-3 horas/contrato en gestión manual
-    """)
+    st.dataframe(
+        df_alertas.style.map(highlight_risk, subset=['Riesgo']),
+        use_container_width=True
+    )
+    st.info(f"💡 **{len(df_alertas)} contratos** requieren acción inmediata.")
 else:
-    st.success("✅ No hay contratos críticos que requieran acción inmediata.")
+    st.success("✅ No hay contratos críticos con boleta de garantía pendiente.")
 
 # ==============================
 # 📋 TABS PRINCIPALES
@@ -383,37 +471,53 @@ tab1, tab2, tab3, tab4 = st.tabs(["📊 Resumen General", "🏢 Por Gerencia / �
 with tab1:
     c1, c2 = st.columns(2)
     with c1:
-        if 'riesgo_spot' in df_f.columns:
-            estado_counts = df_f['riesgo_spot'].value_counts().reset_index()
-            estado_counts.columns = ['Estado', 'Cantidad']
-            color_map = {'BAJO 🟢': '#27ae60', 'MEDIO 🟡': '#f39c12', 'ALTO 🔴': '#e74c3c', 'REVISAR ⚪': '#95a5a6'}
-            fig_dona = px.pie(estado_counts, names='Estado', values='Cantidad', title='Distribución por Estado de Riesgo', hole=0.45, color='Estado', color_discrete_map=color_map)
-            fig_dona.update_traces(textposition='inside', textinfo='percent+label')
-            fig_dona.update_layout(showlegend=False)
-            st.plotly_chart(fig_dona, use_container_width=True)
+        estado_counts = df_f['estado_contrato'].value_counts().reset_index()
+        estado_counts.columns = ['Estado', 'Cantidad']
+        fig_est = px.bar(estado_counts, x='Cantidad', y='Estado', orientation='h',
+                         title='Contratos por Estado (Ariba)', color='Cantidad',
+                         color_continuous_scale='Blues')
+        fig_est.update_layout(yaxis={'categoryorder': 'total ascending'})
+        st.plotly_chart(fig_est, use_container_width=True)
     with c2:
-        if 'planta' in df_f.columns and 'riesgo_spot' in df_f.columns:
+        if 'planta' in df_f.columns:
             df_planta = df_f.groupby(['planta', 'riesgo_spot']).size().reset_index(name='Cantidad')
-            fig_riesgo = px.bar(df_planta, x='planta', y='Cantidad', color='riesgo_spot', title='Riesgo por Planta', color_discrete_map={'BAJO 🟢': '#27ae60', 'MEDIO 🟡': '#f39c12', 'ALTO 🔴': '#e74c3c', 'REVISAR ⚪': '#95a5a6'}, barmode='stack')
+            fig_riesgo = px.bar(df_planta, x='planta', y='Cantidad', color='riesgo_spot',
+                                title='Riesgo por Planta', color_discrete_map=COLOR_MAP, barmode='stack')
             fig_riesgo.update_layout(xaxis_tickangle=-45)
             st.plotly_chart(fig_riesgo, use_container_width=True)
+
+    # Contratos por comprador (fuente directa de Ariba)
+    comp_counts = df_f.groupby(['comprador_estrategico', 'riesgo_spot']).size().reset_index(name='Cantidad')
+    fig_comp = px.bar(comp_counts, x='Cantidad', y='comprador_estrategico', color='riesgo_spot',
+                      title='📌 Contratos por Comprador (Ariba)',
+                      barmode='stack', orientation='h', color_discrete_map=COLOR_MAP)
+    fig_comp.update_layout(yaxis={'categoryorder': 'total ascending'}, height=400)
+    st.plotly_chart(fig_comp, use_container_width=True)
 
 with tab2:
     c1, c2 = st.columns(2)
     with c1:
-        if 'gerencia' in df_f.columns and 'riesgo_spot' in df_f.columns:
+        if 'gerencia' in df_f.columns:
             df_ger = df_f.groupby(['gerencia', 'riesgo_spot']).size().reset_index(name='Cantidad')
-            fig_ger = px.bar(df_ger, x='Cantidad', y='gerencia', color='riesgo_spot', title='Contratos por Gerencia y Riesgo', barmode='stack', orientation='h', color_discrete_map={'BAJO 🟢': '#27ae60', 'MEDIO 🟡': '#f39c12', 'ALTO 🔴': '#e74c3c', 'REVISAR ⚪': '#95a5a6'})
+            fig_ger = px.bar(df_ger, x='Cantidad', y='gerencia', color='riesgo_spot',
+                             title='Contratos por Gerencia y Riesgo', barmode='stack',
+                             orientation='h', color_discrete_map=COLOR_MAP)
             fig_ger.update_layout(yaxis={'categoryorder': 'total ascending'})
             st.plotly_chart(fig_ger, use_container_width=True)
+        else:
+            st.info("ℹ️ Columna 'Gerencia' no disponible. Asegúrate de que la hoja 'Consolidado de Contratos' esté en el archivo.")
     with c2:
-        if 'área' in df_f.columns and 'riesgo_spot' in df_f.columns:
-            df_area = df_f.groupby(['área', 'riesgo_spot']).size().reset_index(name='Cantidad')
-            top_areas = df_f['área'].value_counts().head(12).index
-            df_area = df_area[df_area['área'].isin(top_areas)]
-            fig_area = px.bar(df_area, x='Cantidad', y='área', color='riesgo_spot', title='Top 12 Áreas por Riesgo', barmode='stack', orientation='h', color_discrete_map={'BAJO 🟢': '#27ae60', 'MEDIO 🟡': '#f39c12', 'ALTO 🔴': '#e74c3c', 'REVISAR ⚪': '#95a5a6'})
+        if 'area' in df_f.columns:
+            df_area = df_f.groupby(['area', 'riesgo_spot']).size().reset_index(name='Cantidad')
+            top_areas = df_f['area'].value_counts().head(12).index
+            df_area = df_area[df_area['area'].isin(top_areas)]
+            fig_area = px.bar(df_area, x='Cantidad', y='area', color='riesgo_spot',
+                              title='Top 12 Áreas por Riesgo', barmode='stack',
+                              orientation='h', color_discrete_map=COLOR_MAP)
             fig_area.update_layout(yaxis={'categoryorder': 'total ascending'})
             st.plotly_chart(fig_area, use_container_width=True)
+        else:
+            st.info("ℹ️ Columna 'Área' no disponible.")
 
 with tab3:
     if not df_bg.empty:
@@ -424,51 +528,69 @@ with tab3:
                 bg_counts = df_bg['estado'].value_counts().reset_index()
                 bg_counts.columns = ['Estado', 'Cantidad']
                 bg_color = {'VIGENTE': '#27ae60', 'VENCIDA': '#e74c3c', 'ENTREGADA': '#3498db', 'ENDOSADA': '#95a5a6'}
-                fig_bg = px.pie(bg_counts, names='Estado', values='Cantidad', title='Estado de Boletas', hole=0.4, color='Estado', color_discrete_map={k: bg_color.get(k, '#95a5a6') for k in bg_counts['Estado']})
+                fig_bg = px.pie(bg_counts, names='Estado', values='Cantidad', title='Estado de Boletas',
+                                hole=0.4, color='Estado',
+                                color_discrete_map={k: bg_color.get(k, '#95a5a6') for k in bg_counts['Estado']})
                 fig_bg.update_traces(textposition='inside', textinfo='percent+label')
                 st.plotly_chart(fig_bg, use_container_width=True)
         with c2:
             if 'estado' in df_bg.columns and 'contratista' in df_bg.columns:
                 df_bg_venc = df_bg[df_bg['estado'] == 'VENCIDA']
                 if not df_bg_venc.empty:
-                    top_contratistas = df_bg_venc['contratista'].value_counts().head(10)
-                    fig_bg_area = px.bar(x=top_contratistas.values, y=top_contratistas.index, orientation='h', title='Top Contratistas con BG Vencidas', color=top_contratistas.values, color_continuous_scale='Reds')
-                    fig_bg_area.update_layout(xaxis_title='BG Vencidas', yaxis_title='Contratista')
-                    st.plotly_chart(fig_bg_area, use_container_width=True)
-        st.markdown("#### ⚠️ Contratos que Requieren BG pero Tienen Estado Crítico")
-        if 'cw' in df_bg.columns and 'contrato_ariba' in df.columns:
-            mask_valid_cw = df_bg['cw'].astype(str).str.match(r'CW\d+', na=False)
-            df_bg_valid = df_bg[mask_valid_cw].copy()
-            if not df_bg_valid.empty and 'estado' in df_bg_valid.columns:
-                df_merge = df.merge(df_bg_valid[['cw', 'estado', 'venc.', 'monto']], left_on='contrato_ariba', right_on='cw', how='inner')
-                col_bg_merge = next((c for c in df_merge.columns if 'boleta' in c and 'ariba' in c), None)
-                if col_bg_merge:
-                    mask_bg_merge = df_merge[col_bg_merge].astype(str).str.lower().str.contains('sí|si|yes', na=False)
-                else:
-                    mask_bg_merge = pd.Series([False] * len(df_merge), index=df_merge.index)
-                criticas = df_merge[(df_merge['estado'].str.upper().str.contains('VENCIDA|ENTREGADA', na=False)) & mask_bg_merge]
-                if not criticas.empty:
-                    st.dataframe(criticas[['contrato_ariba', 'proveedor', 'estado', 'venc.', 'monto']], use_container_width=True)
-                    st.warning(f"⚠️ {len(criticas)} contratos con BG requerida pero en estado crítico")
-                else:
-                    st.success("✅ Todos los contratos que requieren BG están al día.")
-            else:
-                st.info("ℹ️ No hay datos válidos de BG para cruzar con contratos.")
-        else:
-            st.info("ℹ️ Columnas necesarias para el cruce no encontradas en los datos.")
+                    top_cont = df_bg_venc['contratista'].value_counts().head(10)
+                    fig_cont = px.bar(x=top_cont.values, y=top_cont.index, orientation='h',
+                                      title='Top Contratistas con BG Vencidas',
+                                      color=top_cont.values, color_continuous_scale='Reds')
+                    fig_cont.update_layout(xaxis_title='BG Vencidas', yaxis_title='Contratista')
+                    st.plotly_chart(fig_cont, use_container_width=True)
+
+        # Cruce con contratos que requieren BG
+        if 'aplica_garantia' in df.columns:
+            df_con_bg = df_f[df_f['aplica_garantia'].astype(str).str.lower().str.contains('sí|si|yes', na=False)]
+            if 'cw' in df_bg.columns:
+                mask_valid = df_bg['cw'].astype(str).str.match(r'CW\d+', na=False)
+                df_bg_valid = df_bg[mask_valid]
+                if not df_bg_valid.empty and 'estado' in df_bg_valid.columns:
+                    df_merge = df_con_bg.merge(
+                        df_bg_valid[['cw', 'estado', 'venc.', 'monto']],
+                        left_on='contrato_ariba', right_on='cw', how='inner'
+                    )
+                    criticas = df_merge[df_merge['estado'].str.upper().str.contains('VENCIDA|ENTREGADA', na=False)]
+                    if not criticas.empty:
+                        st.warning(f"⚠️ {len(criticas)} contratos con BG requerida en estado crítico")
+                        st.dataframe(criticas[['contrato_ariba', 'proveedor', 'comprador_estrategico', 'estado', 'venc.', 'monto']], use_container_width=True)
+                    else:
+                        st.success("✅ Todos los contratos que requieren BG están al día.")
     else:
-        st.info("ℹ️ No se encontró la hoja 'BG' en el archivo. Agrega esta sheet para análisis de garantías.")
+        st.info("ℹ️ No se encontró la hoja 'BG' en el archivo.")
 
 with tab4:
     st.markdown("### 🔍 Explorador de Datos")
-    col_mostrar = st.multiselect("Columnas a mostrar", options=df_f.columns.tolist(), default=[c for c in ['contrato_ariba', 'proveedor', 'área', 'gerencia', 'comprador_estratégico', 'fecha_término_contrato', 'dias_para_vencimiento', 'riesgo_spot', 'planta'] if c in df_f.columns])
+
+    cols_default = [c for c in [
+        'contrato_ariba', 'proveedor', 'comprador_estrategico',
+        'area', 'gerencia', 'estado_contrato', 'fecha_termino',
+        'dias_para_vencimiento', 'riesgo_spot', 'planta'
+    ] if c in df_f.columns]
+
+    col_mostrar = st.multiselect("Columnas a mostrar", options=df_f.columns.tolist(), default=cols_default)
     search_term = st.text_input("🔎 Buscar proveedor o descripción")
-    if search_term and 'proveedor' in df_f.columns:
-        mask = df_f['proveedor'].str.contains(search_term, case=False, na=False)
-        df_view = df_f[mask][col_mostrar] if col_mostrar else df_f[mask]
-    else:
-        df_view = df_f[col_mostrar] if col_mostrar else df_f
-    st.dataframe(df_view.sort_values('dias_para_vencimiento') if 'dias_para_vencimiento' in df_view.columns else df_view, use_container_width=True, height=450)
+
+    df_view = df_f.copy()
+    if search_term:
+        mask = pd.Series([False] * len(df_view), index=df_view.index)
+        for col in ['proveedor', 'descripcion', 'contrato_ariba']:
+            if col in df_view.columns:
+                mask |= df_view[col].astype(str).str.contains(search_term, case=False, na=False)
+        df_view = df_view[mask]
+
+    if col_mostrar:
+        df_view = df_view[col_mostrar]
+
+    if 'dias_para_vencimiento' in df_view.columns:
+        df_view = df_view.sort_values('dias_para_vencimiento')
+
+    st.dataframe(df_view, use_container_width=True, height=450)
     st.caption(f"Mostrando {len(df_view):,} de {len(df_f):,} contratos filtrados")
 
 # ==============================
@@ -480,34 +602,39 @@ st.subheader("📥 Exportar Resultados")
 ec1, ec2, ec3 = st.columns(3)
 with ec1:
     csv_data = df_f.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("💾 Descargar Filtrado (CSV)", data=csv_data, file_name=f"contratos_filtrado_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
+    st.download_button("💾 Descargar Filtrado (CSV)", data=csv_data,
+                       file_name=f"contratos_filtrado_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                       mime="text/csv")
 with ec2:
-    criticos_export = df_f[df_f['riesgo_spot'].isin(['ALTO 🔴', 'MEDIO 🟡'])] if 'riesgo_spot' in df_f.columns else df_f
-    csv_crit = criticos_export.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("🔴 Solo Contratos en Riesgo", data=csv_crit, file_name=f"contratos_riesgo_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
+    criticos = df_f[df_f['riesgo_spot'].isin(['ALTO 🔴', 'MEDIO 🟡'])]
+    csv_crit = criticos.to_csv(index=False).encode('utf-8-sig')
+    st.download_button("🔴 Solo Contratos en Riesgo", data=csv_crit,
+                       file_name=f"contratos_riesgo_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                       mime="text/csv")
 with ec3:
-    urgentes = df_f[(df_f['dias_para_vencimiento'].between(0, 60)) if 'dias_para_vencimiento' in df_f.columns else pd.Series([False]*len(df_f))]
+    urgentes = df_f[df_f['dias_para_vencimiento'].between(0, 60)] if 'dias_para_vencimiento' in df_f.columns else pd.DataFrame()
     csv_urg = urgentes.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("⚠️ Vencen en 60 Días", data=csv_urg, file_name=f"contratos_urgentes_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
+    st.download_button("⚠️ Vencen en 60 Días", data=csv_urg,
+                       file_name=f"contratos_urgentes_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                       mime="text/csv")
 
 # ==============================
-# 🔍 DIAGNÓSTICO TÉCNICO
+# 🔧 DIAGNÓSTICO TÉCNICO
 # ==============================
 
 with st.expander("🔧 Diagnóstico Técnico"):
     d1, d2 = st.columns(2)
     with d1:
-        st.markdown("**Calidad de datos:**")
+        st.markdown("**Calidad de datos (Info Ariba):**")
         st.json(reporte_calidad)
     with d2:
         st.markdown("**Resumen del dataset:**")
         st.json({
-            "Total contratos": len(df),
-            "Contratos filtrados": len(df_f),
-            "Rango fechas": f"{df['fecha_inicio'].min() if 'fecha_inicio' in df.columns else 'N/A'} → {df['fecha_término_contrato'].max() if 'fecha_término_contrato' in df.columns else 'N/A'}",
-            "Última actualización": datetime.now().strftime('%d/%m/%Y %H:%M'),
-            "Compradores únicos": df['comprador_estratégico'].nunique() if 'comprador_estratégico' in df.columns else 0,
-            "Proveedores únicos": df['proveedor'].nunique() if 'proveedor' in df.columns else 0
+            "Total contratos (Info Ariba)": len(df),
+            "Contratos filtrados":          len(df_f),
+            "Compradores únicos":           int(df['comprador_estrategico'].nunique()),
+            "Proveedores únicos":           int(df['proveedor'].nunique()),
+            "Última actualización":         datetime.now().strftime('%d/%m/%Y %H:%M'),
         })
 
 # ==============================
@@ -517,43 +644,38 @@ with st.expander("🔧 Diagnóstico Técnico"):
 st.divider()
 st.caption(f"""
 🔹 Dashboard generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}  
-🔹 Fuente: Export SAP/Ariba - Softys Chile  
-🔹 Parser robusto: Maneja formatos `30"-"09"-"2025`, `4/26/19`, `99.99.9999`  
-🔹 Próximo paso: Automatizar con Task Scheduler + Power Automate
+🔹 **Fuente principal**: Hoja `Info Ariba` ({len(df)} contratos) — datos directos del sistema Ariba  
+🔹 **Datos complementarios**: `Consolidado de Contratos` (Gerencia, Área, Planta, Garantías)  
+🔹 Comprador filtrado por campo `Nombre del propietario` de Ariba (sin inconsistencias de nombres)
 """)
 
-# ==========================================================
-# 🤖 MÓDULO DE INTELIGENCIA ARTIFICIAL (GEMINI) - FINAL
-# ==========================================================
+# ==============================
+# 🤖 ASISTENTE VIRTUAL (GEMINI)
+# ==============================
 
 import google.generativeai as genai
 
 st.divider()
 st.subheader("💬 Asistente Virtual de Compras")
-st.caption("Modelo: Gemini 2.0 Flash (Última Generación)")
+st.caption("Modelo: Gemini 2.0 Flash")
 
-# 1. Obtener la API Key
 api_key_gemini = st.secrets.get("GEMINI_API_KEY", None)
 if not api_key_gemini:
-    api_key_gemini = st.text_input("🔑 Tu API Key de Gemini", type="password", help="Obtén una gratis en aistudio.google.com")
+    api_key_gemini = st.text_input("🔑 Tu API Key de Gemini", type="password",
+                                   help="Obtén una gratis en aistudio.google.com")
 
 if api_key_gemini:
     try:
         genai.configure(api_key=api_key_gemini)
-        
-        # ✅ USAMOS EXCLUSIVAMENTE EL MODELO QUE TU CUENTA TIENE HABILITADO
         model = genai.GenerativeModel('gemini-2.0-flash')
-        
-        # Inicializar historial
+
         if "messages" not in st.session_state:
             st.session_state.messages = []
 
-        # Mostrar historial
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-        # Input del usuario
         if prompt := st.chat_input("Ej: ¿Qué contratos vencen este mes?"):
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
@@ -562,38 +684,34 @@ if api_key_gemini:
             with st.chat_message("assistant"):
                 with st.spinner("🤖 Pensando..."):
                     try:
-                        # ✅ OPTIMIZACIÓN EXTREMA: Solo 5 filas para no gastar cuota
-                        cols_importantes = ['contrato_ariba', 'proveedor', 'estado_contrato_ariba', 'fecha_termino_contrato', 'riesgo_spot']
-                        cols_existentes = [c for c in cols_importantes if c in df_f.columns]
-                        
-                        # Tomamos solo las primeras 5 filas
-                        datos_muestra = df_f[cols_existentes].head(5).to_string(index=False)
-                        
+                        cols_ia = [c for c in [
+                            'contrato_ariba', 'proveedor', 'comprador_estrategico',
+                            'estado_contrato', 'fecha_termino', 'riesgo_spot',
+                            'area', 'gerencia', 'planta'
+                        ] if c in df_f.columns]
+                        datos_muestra = df_f[cols_ia].head(10).to_string(index=False)
                         prompt_sistema = f"""
-                        Eres un asistente de Softys Chile.
-                        
-                        DATOS (Muestra de 5 registros de {len(df_f)} totales):
-                        {datos_muestra}
-                        
-                        REGLAS:
-                        1. Responde SOLO con esta información.
-                        2. Si no está en la muestra, di: 'No veo ese dato en la muestra actual'.
-                        3. Sé breve.
-                        """
+Eres un asistente de gestión de contratos de Softys Chile.
+Fuente de datos: Info Ariba ({len(df_f)} contratos filtrados).
 
+MUESTRA (10 de {len(df_f)} registros):
+{datos_muestra}
+
+REGLAS:
+1. Responde SOLO con esta información.
+2. Si no está en la muestra, indica: 'No tengo ese detalle en la muestra actual'.
+3. Sé breve y directo.
+"""
                         response = model.generate_content([prompt_sistema, prompt])
                         respuesta = response.text
-                        
                         st.markdown(respuesta)
                         st.session_state.messages.append({"role": "assistant", "content": respuesta})
-
                     except Exception as e:
                         if "429" in str(e):
-                            st.error("⚠️ Límite diario alcanzado. Intenta mañana.")
+                            st.error("⚠️ Límite diario de Gemini alcanzado. Intenta mañana.")
                         else:
                             st.error(f"Error: {str(e)}")
-                        
     except Exception as e:
-        st.error(f"Error de configuración: {str(e)}")
+        st.error(f"Error de configuración Gemini: {str(e)}")
 else:
-    st.info("👈 Ingresa tu API Key arriba o en Secrets para chatear.")
+    st.info("👈 Ingresa tu API Key de Gemini para activar el asistente.")
