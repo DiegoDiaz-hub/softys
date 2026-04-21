@@ -739,4 +739,3 @@ REGLAS:
         st.error(f"Error de configuración Gemini: {str(e)}")
 else:
     st.info("👈 Ingresa tu API Key de Gemini para activar el asistente.")
-```
