@@ -391,6 +391,19 @@ with st.sidebar:
     compradores = ['Todos'] + sorted(df['comprador_estrategico'].dropna().unique().astype(str).tolist())
     comprador_sel = st.selectbox("Comprador (propietario Ariba)", compradores)
 
+    # ── Comprador Estratégico desde Consolidado de Contratos ─────────────────
+    comprador_consol_sel = 'Todos'
+    if 'comprador_estrategico_consol' in df.columns:
+        valores_consol = df['comprador_estrategico_consol'].dropna().astype(str).str.strip()
+        valores_consol = valores_consol[valores_consol != 'nan']
+        if len(valores_consol.unique()) > 0:
+            compradores_consol = ['Todos'] + sorted(valores_consol.unique().tolist())
+            st.divider()
+            comprador_consol_sel = st.selectbox(
+                "👤 Comprador Estratégico (Consolidado)", 
+                compradores_consol
+            )
+
     if 'gerencia' in df.columns:
         gerencias = ['Todas'] + sorted(df['gerencia'].dropna().unique().astype(str).tolist())
         gerencia_sel = st.selectbox("Gerencia", gerencias)
@@ -412,12 +425,15 @@ with st.sidebar:
     estados_contrato = ['Todos'] + sorted(df['estado_contrato'].dropna().unique().astype(str).tolist())
     estado_sel = st.selectbox("Estado Contrato (Ariba)", estados_contrato)
 
+
 # ── Aplicar filtros ─────────────────────────────────────────────────────────
 df_f = df.copy()
 if riesgo_sel != 'Todos':
     df_f = df_f[df_f['riesgo_spot'] == riesgo_sel]
 if comprador_sel != 'Todos':
     df_f = df_f[df_f['comprador_estrategico'] == comprador_sel]
+if 'comprador_estrategico_consol' in df_f.columns and comprador_consol_sel != 'Todos':
+    df_f = df_f[df_f['comprador_estrategico_consol'] == comprador_consol_sel]
 if gerencia_sel != 'Todas' and 'gerencia' in df_f.columns:
     df_f = df_f[df_f['gerencia'] == gerencia_sel]
 if area_sel != 'Todas' and 'area' in df_f.columns:
@@ -426,6 +442,7 @@ if planta_sel != 'Todas' and 'planta' in df_f.columns:
     df_f = df_f[df_f['planta'].astype(str).str.contains(planta_sel, na=False)]
 if estado_sel != 'Todos':
     df_f = df_f[df_f['estado_contrato'] == estado_sel]
+
 
 # ==============================
 # 📊 KPIs Y GRÁFICOS
