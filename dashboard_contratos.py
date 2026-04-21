@@ -378,56 +378,87 @@ if df.empty:
     st.stop()
 
 # ==============================
-# 🎛️ FILTROS EN SIDEBAR
+# 🎛️ FILTROS CORREGIDOS
 # ==============================
+
+# 1. Limpieza previa: Rellenar nulos con "Sin Dato" para evitar errores de ordenamiento
+cols_clave = ['gerencia', 'área', 'comprador_estrategico', 'planta', 'riesgo_spot']
+for col in cols_clave:
+    if col in df.columns:
+        # Rellenamos NaN con un string visible y limpiamos espacios
+        df[col] = df[col].fillna("Sin Dato").astype(str).str.strip()
+
+# Copiamos el dataframe limpio para filtrar
+df_f = df.copy()
 
 with st.sidebar:
     st.header("🎛️ Filtros")
+    
+    # Botón para limpiar filtros
+    if st.button("🔄 Limpiar Filtros"):
+        st.session_state.clear()
+        st.rerun()
 
-    estados = ['Todos'] + sorted(df['riesgo_spot'].dropna().unique().tolist())
-    riesgo_sel = st.selectbox("Riesgo Spot", estados)
+    st.divider()
 
-    # ── Comprador: usa 'comprador_estrategico' de Info Ariba ─────────────────
-    compradores = ['Todos'] + sorted(df['comprador_estrategico'].dropna().unique().astype(str).tolist())
-    comprador_sel = st.selectbox("Comprador (propietario Ariba)", compradores)
+    # --- FILTRO COMPRADOR ESTRATÉGICO ---
+    comprador_sel = 'Todos'
+    if 'comprador_estrategico' in df_f.columns:
+        compradores = sorted(df_f['comprador_estrategico'].unique().tolist())
+        compradores.insert(0, 'Todos')
+        comprador_sel = st.selectbox("👤 Comprador Estratégico", compradores, index=0)
+        
+        # Buscador parcial por si el nombre varía
+        search_comprador = st.text_input("🔎 Buscar nombre parcial", placeholder="Ej: Jorge, Juan...")
 
-    if 'gerencia' in df.columns:
-        gerencias = ['Todas'] + sorted(df['gerencia'].dropna().unique().astype(str).tolist())
-        gerencia_sel = st.selectbox("Gerencia", gerencias)
-    else:
-        gerencia_sel = 'Todas'
+    st.divider()
 
-    if 'area' in df.columns:
-        areas = ['Todas'] + sorted(df['area'].dropna().unique().astype(str).tolist())
-        area_sel = st.selectbox("Área", areas)
-    else:
-        area_sel = 'Todas'
+    # --- OTROS FILTROS ---
+    estados = sorted(df_f['riesgo_spot'].unique().tolist()) if 'riesgo_spot' in df_f.columns else []
+    estados.insert(0, 'Todos')
+    riesgo_sel = st.selectbox("Riesgo Spot", estados, index=0)
 
-    if 'planta' in df.columns:
-        plantas = ['Todas'] + sorted(df['planta'].dropna().unique().astype(str).tolist())
-        planta_sel = st.selectbox("Planta", plantas)
-    else:
-        planta_sel = 'Todas'
+    gerencia_sel = 'Todas'
+    if 'gerencia' in df_f.columns:
+        gerencias = sorted(df_f['gerencia'].unique().tolist())
+        gerencias.insert(0, 'Todas')
+        gerencia_sel = st.selectbox("Gerencia", gerencias, index=0)
 
-    estados_contrato = ['Todos'] + sorted(df['estado_contrato'].dropna().unique().astype(str).tolist())
-    estado_sel = st.selectbox("Estado Contrato (Ariba)", estados_contrato)
-
-# ── Aplicar filtros ─────────────────────────────────────────────────────────
-df_f = df.copy()
-if riesgo_sel != 'Todos':
-    df_f = df_f[df_f['riesgo_spot'] == riesgo_sel]
-if comprador_sel != 'Todos':
-    df_f = df_f[df_f['comprador_estrategico'] == comprador_sel]
-if gerencia_sel != 'Todas' and 'gerencia' in df_f.columns:
-    df_f = df_f[df_f['gerencia'] == gerencia_sel]
-if area_sel != 'Todas' and 'area' in df_f.columns:
-    df_f = df_f[df_f['area'] == area_sel]
-if planta_sel != 'Todas' and 'planta' in df_f.columns:
-    df_f = df_f[df_f['planta'].astype(str).str.contains(planta_sel, na=False)]
-if estado_sel != 'Todos':
-    df_f = df_f[df_f['estado_contrato'] == estado_sel]
+    area_sel = 'Todas'
+    if 'área' in df_f.columns:
+        areas = sorted(df_f['área'].unique().tolist())
+        areas.insert(0, 'Todas')
+        area_sel = st.selectbox("Área", areas, index=0)
+        
+    planta_sel = 'Todas'
+    if 'planta' in df_f.columns:
+        plantas = sorted(df_f['planta'].unique().tolist())
+        plantas.insert(0, 'Todas')
+        planta_sel = st.selectbox("Planta", plantas, index=0)
 
 # ==============================
+# APLICACIÓN DE FILTROS
+# ==============================
+
+if riesgo_sel != 'Todos':
+    df_f = df_f[df_f['riesgo_spot'] == riesgo_sel]
+if gerencia_sel != 'Todas':
+    df_f = df_f[df_f['gerencia'] == gerencia_sel]
+if area_sel != 'Todas':
+    df_f = df_f[df_f['área'] == area_sel]
+if planta_sel != 'Todas':
+    df_f = df_f[df_f['planta'] == planta_sel]
+
+# Filtro inteligente de comprador
+if 'comprador_estrategico' in df_f.columns:
+    if comprador_sel != 'Todos':
+        df_f = df_f[df_f['comprador_estrategico'] == comprador_sel]
+    
+    if 'search_comprador' in locals() and search_comprador:
+        mask = df_f['comprador_estrategico'].str.contains(search_comprador, case=False, na=False)
+        df_f = df_f[mask]
+
+st.info(f"📊 Mostrando **{len(df_f)}** contratos.")
 # 📊 KPIs Y GRÁFICOS
 # ==============================
 
