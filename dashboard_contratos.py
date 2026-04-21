@@ -483,6 +483,16 @@ if 'comprador_estrategico_consol' in df_f.columns and comprador_consol_sel != 'T
     df_f = df_f[df_f['comprador_estrategico_consol'] == comprador_consol_sel]
 
 
+# ── Aplicar filtros de comprador ────────────────────────────────────────────────
+if 'comprador_estrategico' in df_f.columns and comprador_ariba_sel != 'Todos':
+    df_f = df_f[df_f['comprador_estrategico'] == comprador_ariba_sel]
+    
+if 'comprador_estrategico_consol' in df_f.columns and comprador_consol_sel != 'Todos':
+    df_f = df_f[df_f['comprador_estrategico_consol'] == comprador_consol_sel]
+
+
+
+
 # ── FILTROS DE COMPRADORES (Doble opción: Ariba + Consolidado) ─────────────────
 
 # 1. Comprador desde Info Ariba (fuente principal)
