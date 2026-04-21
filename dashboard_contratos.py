@@ -387,15 +387,16 @@ with st.sidebar:
     estados = ['Todos'] + sorted(df['riesgo_spot'].dropna().unique().tolist())
     riesgo_sel = st.selectbox("Riesgo Spot", estados)
 
-    # ── Comprador: usa 'comprador_estrategico' de Info Ariba ─────────────────
-    compradores = ['Todos'] + sorted(df['comprador_estrategico'].dropna().unique().astype(str).tolist())
-    comprador_sel = st.selectbox("Comprador (propietario Ariba)", compradores)
+    # ── Comprador desde Info Ariba ────────────────────────────────────────
+    compradores_ariba = ['Todos'] + sorted(df['comprador_estrategico'].dropna().unique().astype(str).tolist())
+    comprador_ariba_sel = st.selectbox("Comprador (propietario Ariba)", compradores_ariba)
 
-    # ── Comprador Estratégico desde Consolidado de Contratos ─────────────────
+    # ── Comprador Estratégico desde Consolidado de Contratos ───────────────
     comprador_consol_sel = 'Todos'
     if 'comprador_estrategico_consol' in df.columns:
+        # Obtener valores únicos, limpiar nulos y convertir a string
         valores_consol = df['comprador_estrategico_consol'].dropna().astype(str).str.strip()
-        valores_consol = valores_consol[valores_consol != 'nan']
+        valores_consol = valores_consol[valores_consol != 'nan']  # Eliminar strings 'nan'
         if len(valores_consol.unique()) > 0:
             compradores_consol = ['Todos'] + sorted(valores_consol.unique().tolist())
             st.divider()
@@ -425,13 +426,12 @@ with st.sidebar:
     estados_contrato = ['Todos'] + sorted(df['estado_contrato'].dropna().unique().astype(str).tolist())
     estado_sel = st.selectbox("Estado Contrato (Ariba)", estados_contrato)
 
-
 # ── Aplicar filtros ─────────────────────────────────────────────────────────
 df_f = df.copy()
 if riesgo_sel != 'Todos':
     df_f = df_f[df_f['riesgo_spot'] == riesgo_sel]
-if comprador_sel != 'Todos':
-    df_f = df_f[df_f['comprador_estrategico'] == comprador_sel]
+if comprador_ariba_sel != 'Todos':
+    df_f = df_f[df_f['comprador_estrategico'] == comprador_ariba_sel]
 if 'comprador_estrategico_consol' in df_f.columns and comprador_consol_sel != 'Todos':
     df_f = df_f[df_f['comprador_estrategico_consol'] == comprador_consol_sel]
 if gerencia_sel != 'Todas' and 'gerencia' in df_f.columns:
@@ -442,7 +442,6 @@ if planta_sel != 'Todas' and 'planta' in df_f.columns:
     df_f = df_f[df_f['planta'].astype(str).str.contains(planta_sel, na=False)]
 if estado_sel != 'Todos':
     df_f = df_f[df_f['estado_contrato'] == estado_sel]
-
 
 # ==============================
 # 📊 KPIs Y GRÁFICOS
