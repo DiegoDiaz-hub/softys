@@ -291,18 +291,21 @@ if df.empty:
     st.stop()
 
 # ==============================
-# 🎛️ FILTROS INTELIGENTES
+# 🎛️ FILTROS INTELIGENTES MEJORADOS
 # ==============================
 
-# 1. Limpieza profunda de datos para evitar errores
+# 1. Limpieza profunda de datos para evitar errores en filtros
 df_f = df.copy()
 
-# Rellenar nulos en columnas clave para que aparezcan en los filtros
-cols_clave = ['gerencia', 'área', 'comprador_estratégico', 'planta', 'riesgo_spot']
-for col in cols_clave:
+# Columnas clave de compradores
+cols_compradores = ['comprador_estrategico', 'comprador_tactico']
+
+for col in cols_compradores:
     if col in df_f.columns:
-        # Convertir a string y rellenar vacíos con "Sin Asignar"
+        # Convertir a string, quitar espacios extra y rellenar nulos con "Sin Asignar"
         df_f[col] = df_f[col].fillna("Sin Asignar").astype(str).str.strip()
+        # Opcional: Si quieres tratar "nan" o "null" como texto vacío, descomenta la siguiente línea
+        # df_f[col] = df_f[col].replace(['nan', 'null', 'None'], "Sin Asignar")
 
 with st.sidebar:
     st.header("🎛️ Filtros")
@@ -314,21 +317,25 @@ with st.sidebar:
 
     st.divider()
     
-    # --- FILTRO DE COMPRADOR ESTRATÉGICO MEJORADO ---
-    comprador_sel = 'Todos'
+    # --- FILTRO DE COMPRADOR ESTRATÉGICO ---
+    comprador_est_sel = 'Todos'
     if 'comprador_estrategico' in df_f.columns:
-        # Obtener lista única de compradores
-        compradores_unicos = sorted(df_f['comprador_estrategico'].unique().tolist())
-        # Insertar 'Todos' al principio
-        compradores_unicos.insert(0, 'Todos')
+        compradores_est = sorted(df_f['comprador_estrategico'].unique().tolist())
+        compradores_est.insert(0, 'Todos')
+        comprador_est_sel = st.selectbox("👤 Comprador Estratégico", compradores_est, index=0)
         
-        comprador_sel = st.selectbox("👤 Comprador Estratégico", compradores_unicos, index=0)
-        
-        # 🔍 BUSCADOR ADICIONAL PARA COMPRADORES
-        st.caption("¿No aparece tu nombre? Búscalo aquí:")
-        search_comprador = st.text_input("Buscar por nombre parcial", placeholder="Ej: Jorge, Juan, BPO...")
-    else:
-        st.warning("⚠️ Columna 'Comprador Estratégico' no encontrada.")
+    # --- FILTRO DE COMPRADOR TÁCTICO ---
+    comprador_tac_sel = 'Todos'
+    if 'comprador_tactico' in df_f.columns:
+        compradores_tac = sorted(df_f['comprador_tactico'].unique().tolist())
+        compradores_tac.insert(0, 'Todos')
+        comprador_tac_sel = st.selectbox("👤 Comprador Táctico", compradores_tac, index=0)
+
+    st.divider()
+    
+    # 🔍 BUSCADOR UNIVERSAL DE COMPRADORES (Solución principal)
+    st.caption("¿No aparece tu nombre exacto? Búscalo aquí:")
+    search_comprador = st.text_input("Buscar por nombre parcial (Estratégico o Táctico)", placeholder="Ej: Jorge, Juan, BPO...")
 
     st.divider()
 
@@ -375,26 +382,24 @@ if area_sel != 'Todas':
 if planta_sel != 'Todas':
     df_f = df_f[df_f['planta'] == planta_sel]
 
-# 5. Filtro POR COMPRADOR (Lógica Inteligente)
-if 'comprador_estrategico' in df_f.columns:
-    if comprador_sel != 'Todos':
-        # Filtro exacto si se seleccionó del desplegable
-        df_f = df_f[df_f['comprador_estrategico'] == comprador_sel]
-    
-    # Si hay texto en el buscador parcial, prioriza eso o lo suma al filtro
-    if 'search_comprador' in locals() and search_comprador:
-        # Busca coincidencias parciales (ej: "Jorge" encuentra "Jorge Urrutia" y "Jorge Alfonso...")
-        mask_comprador = df_f['comprador_estrategico'].str.contains(search_comprador, case=False, na=False)
-        df_f = df_f[mask_comprador]
+# 5. Filtro POR COMPRADOR ESTRATÉGICO
+if 'comprador_estrategico' in df_f.columns and comprador_est_sel != 'Todos':
+    df_f = df_f[df_f['comprador_estrategico'] == comprador_est_sel]
 
-# 6. Buscador Universal (Proveedor/Contrato) - Opcional si quieres mantenerlo
-# search_term = st.text_input("🔎 Buscar Proveedor o Contrato", key="search_universal")
-# if search_term:
-#     mask_universal = df_f.astype(str).apply(lambda x: x.str.contains(search_term, case=False, na=False)).any(axis=1)
-#     df_f = df_f[mask_universal]
+# 6. Filtro POR COMPRADOR TÁCTICO
+if 'comprador_tactico' in df_f.columns and comprador_tac_sel != 'Todos':
+    df_f = df_f[df_f['comprador_tactico'] == comprador_tac_sel]
+
+# 7. Buscador Parcial de Compradores (Prioridad alta)
+if 'search_comprador' in locals() and search_comprador:
+    # Busca en ambas columnas simultáneamente
+    mask_est = df_f['comprador_estrategico'].str.contains(search_comprador, case=False, na=False) if 'comprador_estrategico' in df_f.columns else pd.Series([False]*len(df_f))
+    mask_tac = df_f['comprador_tactico'].str.contains(search_comprador, case=False, na=False) if 'comprador_tactico' in df_f.columns else pd.Series([False]*len(df_f))
+    
+    # Mantiene las filas donde coincide en cualquiera de las dos
+    df_f = df_f[mask_est | mask_tac]
 
 st.info(f"📊 Mostrando **{len(df_f)}** contratos filtrados.")
-
 # ==============================
 # 📊 KPIs Y GRÁFICOS
 # ==============================
