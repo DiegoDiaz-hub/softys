@@ -113,7 +113,7 @@ def classify_buyer_strict(raw_name: str) -> tuple:
     return None, None
 
 # ==============================
-# 🔧 FUNCIONES BACKEND - NUEVO PARSER PARA PIVOT CRUDO
+# 🔧 FUNCIONES BACKEND
 # ==============================
 
 def parse_fecha(valor) -> pd.Timestamp:
@@ -151,84 +151,86 @@ def limpiar_monto(valor) -> float:
 
 def cargar_pivot_crudo(file_content: bytes) -> pd.DataFrame:
     """
-    Parsea el Pivot crudo de Ariba:
-    - Detecta la fila con 'Raw_Field_Names' que tiene los headers concatenados
-    - Extrae y separa los nombres de columnas reales
-    - Lee los datos saltando metadata
-    - Retorna DataFrame limpio listo para mapeo
+    Parsea el Pivot crudo de Ariba con estructura real:
+    - Salta filas de metadata iniciales
+    - Detecta automáticamente la fila de headers buscando 'ContractId'
+    - Retorna DataFrame limpio con nombres de columna correctos
     """
-    # Leer primeras filas para detectar estructura
-    df_raw = pd.read_excel(BytesIO(file_content), header=None, nrows=100, engine='openpyxl')
+    # Leer primeras 50 filas para detectar estructura
+    df_scan = pd.read_excel(BytesIO(file_content), header=None, nrows=50, engine='openpyxl')
     
-    # Buscar fila con 'Raw_Field_Names'
-    header_row_idx = None
-    for i, row in df_raw.iterrows():
-        row_str = ' '.join(str(v).lower() for v in row if pd.notna(v))
-        if 'raw_field_names' in row_str:
-            header_row_idx = i
+    # Buscar fila donde la primera columna válida sea 'ContractId' o similar
+    header_row = None
+    for i in range(len(df_scan)):
+        first_val = str(df_scan.iloc[i, 0]).strip() if pd.notna(df_scan.iloc[i, 0]) else ''
+        if first_val.startswith('CW') or 'contractid' in first_val.lower():
+            header_row = i
             break
     
-    if header_row_idx is None:
-        raise ValueError("No se encontró la fila 'Raw_Field_Names' con los encabezados del Pivot de Ariba.")
+    if header_row is None:
+        # Fallback: intentar leer con header en fila 2 (estructura típica de Ariba)
+        try:
+            df = pd.read_excel(BytesIO(file_content), header=2, engine='openpyxl')
+            df.columns = [str(c).strip() for c in df.columns]
+            return df.dropna(how='all').reset_index(drop=True)
+        except:
+            raise ValueError("No se pudo detectar automáticamente la fila de encabezados. Verifica que el archivo sea un export válido de Ariba Analysis.")
     
-    # Extraer y parsear nombres de columnas desde la celda concatenada
-    raw_headers_cell = None
-    for col in range(df_raw.shape[1]):
-        val = df_raw.iloc[header_row_idx, col]
-        if pd.notna(val) and 'ContractId' in str(val):
-            raw_headers_cell = val
-            break
-    
-    if raw_headers_cell is None:
-        raise ValueError("No se pudo extraer la lista de campos desde 'Raw_Field_Names'.")
-    
-    # Separar por coma y limpiar
-    column_names = [c.strip() for c in str(raw_headers_cell).split(',') if c.strip()]
-    
-    # Leer datos reales (saltando filas de metadata)
-    data_start_row = header_row_idx + 1
-    df_data = pd.read_excel(BytesIO(file_content), header=None, skiprows=range(data_start_row), engine='openpyxl')
-    
-    # Asignar nombres de columna
-    if len(column_names) <= df_data.shape[1]:
-        df_data.columns = column_names + [f'Unnamed_{i}' for i in range(len(column_names), df_data.shape[1])]
-    else:
-        df_data.columns = column_names[:df_data.shape[1]]
+    # Leer datos usando la fila detectada como header
+    df = pd.read_excel(BytesIO(file_content), header=header_row, engine='openpyxl')
+    df.columns = [str(c).strip() for c in df.columns]
     
     # Limpiar filas vacías y resetear índice
-    df_data = df_data.dropna(how='all').reset_index(drop=True)
+    df = df.dropna(how='all').reset_index(drop=True)
     
-    return df_data
+    return df
 
 def transformar_pivot_a_consolidado(df_pivot: pd.DataFrame) -> pd.DataFrame:
     """
-    Transforma el Pivot crudo al formato esperado por el dashboard:
-    - Mapea campos técnicos de Ariba a nombres en español
-    - Valida compradores contra lista maestra
-    - Filtra contratos cerrados y datos inválidos
-    - Formatea fechas y montos
+    Transforma el Pivot crudo al formato esperado por el dashboard.
     """
-    # Mapeo de campos Ariba → Consolidado
+    # Mapeo de campos Ariba → Consolidado (nombres reales del Pivot)
     ARIBA_MAP = {
+        # Identificadores
         'ContractId': 'contrato_ariba',
         'ProjectInfo.ProjectName': 'descripcion',
+        'Project Name': 'descripcion',  # Variación común
         'Owner.UserName': 'comprador_estrategico_raw',
+        'Owner': 'comprador_estrategico_raw',  # Variación
         'ContractStatus': 'estado_contrato',
+        'Status': 'estado_contrato',  # Variación
+        
+        # Proveedor
         'UF_string11': 'rut',
+        'Rut': 'rut',  # Variación
         'UF_string10': 'cod_sap',
+        'Código': 'cod_sap',  # Variación
         'AffectedParties.CommonSupplierName': 'proveedor',
+        'Supplier': 'proveedor',  # Variación
+        'Proveedor': 'proveedor',  # Variación
+        
+        # Fechas
         'EffectiveDate.Day': 'fecha_inicio',
+        'Fecha Inicio': 'fecha_inicio',  # Variación
         'ExpirationDate.Day': 'fecha_termino',
+        'Fecha Fin': 'fecha_termino',  # Variación
+        'EndDate.Year': 'anio_fin',
+        
+        # Otros
         'Description': 'descripcion_alt',
         'Region.RegionNameL2': 'region',
+        'Region': 'region',  # Variación
         'IsEvergreen': 'es_indefinido_raw',
+        'Indefinido': 'es_indefinido_raw',  # Variación
         'UF_boolean1': 'aplica_garantia',
+        'Garantía': 'aplica_garantia',  # Variación
         'sum(Amount)': 'monto_contrato',
+        'Monto': 'monto_contrato',  # Variación
     }
     
     df = pd.DataFrame()
     for ariba_col, target_col in ARIBA_MAP.items():
-        if ariba_col in df_pivot.columns:
+        if ariba_col in df_pivot.columns and target_col not in df.columns:
             df[target_col] = df_pivot[ariba_col].copy()
     
     # Validación estricta de compradores
@@ -406,7 +408,7 @@ def cargar_y_procesar_contratos(file_hash: str, file_content: bytes, usar_pivot_
         return df, df_bg, reporte
 
 # ==============================
-# 📊 FUNCIONES DE VISUALIZACIÓN (sin cambios)
+# 📊 FUNCIONES DE VISUALIZACIÓN
 # ==============================
 
 def crear_kpi_cards(df: pd.DataFrame) -> None:
@@ -690,7 +692,7 @@ st.caption(f"""
 """)
 
 # ==============================
-# 🤖 ASISTENTE VIRTUAL (GEMINI) - SIN CAMBIOS
+# 🤖 ASISTENTE VIRTUAL (GEMINI)
 # ==============================
 
 import google.generativeai as genai
