@@ -155,34 +155,45 @@ def parse_fecha(valor) -> pd.Timestamp:
         return pd.NaT
 
 def cargar_pivot_crudo(file_content: bytes) -> pd.DataFrame:
-    """Parsea el Pivot crudo de Ariba con estructura real de columnas posicionales."""
-    # Leer sin header para detectar estructura
-    df = pd.read_excel(BytesIO(file_content), header=None, engine='openpyxl')
+    """Parsea el Pivot crudo de Ariba con estructura real."""
+    # Leer todas las hojas
+    try:
+        sheets = pd.read_excel(BytesIO(file_content), sheet_name=None, header=None, engine='openpyxl')
+    except Exception as e:
+        raise ValueError(f"Error al leer el archivo: {str(e)}")
     
-    # Saltar filas de metadata (las que contienen "This Worksheet" o "Query_Filters")
-    start_row = 0
+    # Obtener la primera hoja (generalmente es "Data" o "Sheet1")
+    sheet_name = list(sheets.keys())[0]
+    df = sheets[sheet_name]
+    
+    # Buscar la primera fila con un contrato válido (que empiece con CW)
+    start_row = None
     for i in range(len(df)):
-        first_cell = str(df.iloc[i, 0]).lower() if pd.notna(df.iloc[i, 0]) else ''
-        if first_cell.startswith('cw') and len(first_cell) > 2:  # Contrato válido (CW...)
+        first_cell = str(df.iloc[i, 0]).strip() if pd.notna(df.iloc[i, 0]) else ''
+        if first_cell.upper().startswith('CW') and len(first_cell) > 2:
             start_row = i
             break
     
-    if start_row == 0:
+    if start_row is None:
+        # Si no encuentra CW, intentar con cualquier fila que tenga datos
+        for i in range(len(df)):
+            if pd.notna(df.iloc[i, 0]) and str(df.iloc[i, 0]).strip():
+                start_row = i
+                break
+    
+    if start_row is None:
         raise ValueError("No se encontraron contratos válidos en el Pivot. Verifica que el archivo contenga datos de Ariba Analysis.")
     
-    # Leer desde la fila de datos
-    df = pd.read_excel(BytesIO(file_content), header=None, skiprows=start_row, engine='openpyxl')
+    # Leer desde la fila encontrada
+    df = pd.read_excel(BytesIO(file_content), sheet_name=sheet_name, header=start_row, engine='openpyxl')
     
-    # Asignar nombres de columnas basados en la estructura del Pivot de Ariba
-    # Columnas típicas: 0=ContractId, 1=ProjectName, 2=BeginDate, 3=Owner, 4=SAPCode, 5=IsEvergreen, 6=Region, 7=RUT, 8=Supplier, 9=Description, 10=EffectiveDate, 11=Year, 12=Status, 13=ExpirationDate...
-    if len(df.columns) >= 13:
+    # Asignar nombres de columnas basados en la estructura del Pivot
+    if len(df.columns) >= 14:
         df.columns = [
-            'ContractId', 'ProjectName', 'BeginDate', 'Owner', 'SAPCode', 
+            'ContractId', 'ProjectName', 'BeginDate', 'Owner', 'SAPCode',
             'IsEvergreen', 'Region', 'RUT', 'Supplier', 'Description',
             'EffectiveDate', 'Year', 'Status', 'ExpirationDate'
-        ] + [f'Extra_{i}' for i in range(13, len(df.columns))]
-    else:
-        df.columns = [f'Column_{i}' for i in range(len(df.columns))]
+        ] + [f'Extra_{i}' for i in range(14, len(df.columns))]
     
     # Limpiar filas vacías
     df = df.dropna(how='all').reset_index(drop=True)
@@ -200,7 +211,7 @@ def cargar_consolidado_drive(file_content: bytes) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 def procesar_pivot_a_comparar(df_pivot: pd.DataFrame) -> pd.DataFrame:
-    """Procesa el Pivot para comparación usando columnas posicionales."""
+    """Procesa el Pivot para comparación."""
     df = pd.DataFrame()
     
     # Mapeo basado en posición/nombre de columnas del Pivot
