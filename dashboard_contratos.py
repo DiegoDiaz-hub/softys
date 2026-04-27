@@ -1,456 +1,225 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import re
-import hashlib
-from io import BytesIO
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
 # ==============================
 # 🧠 CONFIGURACIÓN INICIAL
 # ==============================
-st.set_page_config(
-    page_title="Comparador de Contratos — Softys",
-    page_icon="🔍",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Comparador de Contratos — Softys", page_icon="🔍", layout="wide")
 
 # ==============================
-# 🎨 ESTILOS PERSONALIZADOS
+# 🎨 ESTILOS
 # ==============================
 st.markdown("""
 <style>
-    .metric-card {
-        background: linear-gradient(135deg, #1e3a5f, #2d5986);
-        border-radius: 12px;
-        padding: 16px 20px;
-        color: white;
-        text-align: center;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-    }
-    .metric-value { font-size: 2rem; font-weight: 700; margin: 4px 0; }
-    .metric-label { font-size: 0.8rem; opacity: 0.85; text-transform: uppercase; letter-spacing: 1px; }
-    .alert-box {
-        border-left: 5px solid #e74c3c;
-        background: #fdf2f2;
-        padding: 12px 16px;
-        border-radius: 0 8px 8px 0;
-        margin-bottom: 8px;
-        font-size: 0.9rem;
-    }
-    .warn-box {
-        border-left: 5px solid #f39c12;
-        background: #fef9ed;
-        padding: 12px 16px;
-        border-radius: 0 8px 8px 0;
-        margin-bottom: 8px;
-        font-size: 0.9rem;
-    }
-    .success-box {
-        border-left: 5px solid #27ae60;
-        background: #f0fdf4;
-        padding: 12px 16px;
-        border-radius: 0 8px 8px 0;
-        margin-bottom: 8px;
-        font-size: 0.9rem;
-    }
+    .diff-match { color: #27ae60; font-weight: bold; }
+    .diff-mismatch { color: #e74c3c; font-weight: bold; background: #fff3cd; padding: 2px 6px; border-radius: 4px; }
+    .metric-card { background: linear-gradient(135deg, #1e3a5f, #2d5986); border-radius: 10px; padding: 15px; color: white; text-align: center; }
     div[data-testid="stMetricValue"] { font-size: 1.8rem; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==============================
-# 🛡️ CONSTANTES
-# ==============================
-MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024
-
-# ==============================
-# ✅ LISTA MAESTRA DE COMPRADORES (ESTRICTA)
+# ✅ LISTAS OFICIALES DE COMPRADORES
 # ==============================
 STRATEGIC_BUYERS = {
     'Patricio Espinoza', 'Jorge Urrutia', 'Bárbara García', 'Claudio Berrios',
     'Martina Fuentes', 'Joseph España', 'Michelle Palma', 'Juan Figueroa',
     'Magdalena Farias', 'Denisse Andrea Gonzalez Terrile', 'Jorge Alfonso Urrutia Carillo',
-    'Viviana Grandón', 'Priscilla Gre Guerra', 'Juan Daniel Figueroa'
+    'Viviana Grandón', 'Priscilla Gre Guerra', 'Juan Daniel Figueroa', 'Dayana Dávila'
 }
-
 TACTICAL_BUYERS = {
     'Leonardo Nacarate', 'Martina Fuentes', 'Scarlette Lucero',
     'Margarita Lineros', 'Erika Silva', 'Karina Satelo', 'Pablo Labs',
     'Dayana Dávila', 'BPO'
 }
+ALL_VALID_BUYERS = STRATEGIC_BUYERS | TACTICAL_BUYERS
 
 TYPO_CORRECTIONS = {
     'jorge uturria': 'Jorge Urrutia', 'jorgue urrutia': 'Jorge Urrutia',
     'dennis andrea gonzales': 'Denisse Andrea Gonzalez Terrile',
     'denisse andrea gonzalez terrile': 'Denisse Andrea Gonzalez Terrile',
-    'juan daniel figueroa': 'Juan Daniel Figueroa',
-    'juan figueroa': 'Juan Figueroa',
-    'joseph eduardo españa escalona': 'Joseph España',
-    'joseph españa': 'Joseph España',
-    'michelle esperanza': 'Michelle Palma',
-    'leonardo nacarete': 'Leonardo Nacarate',
-    'priscilla gre guerra': 'Priscilla Gre Guerra',
-    'dayana davila': 'Dayana Dávila'
+    'juan daniel figueroa': 'Juan Daniel Figueroa', 'juan figueroa': 'Juan Figueroa',
+    'joseph eduardo españa escalona': 'Joseph España', 'joseph españa': 'Joseph España',
+    'michelle esperanza': 'Michelle Palma', 'leonardo nacarete': 'Leonardo Nacarate',
+    'priscilla gre guerra': 'Priscilla Gre Guerra', 'dayana davila': 'Dayana Dávila'
 }
 
-def normalize_name(name: str) -> str:
-    if pd.isna(name) or str(name).strip() == '': return ''
+def normalize_name(name):
+    if pd.isna(name) or not str(name).strip(): return ''
     clean = str(name).strip().lower()
     clean = ''.join(c for c in clean if c not in 'áéíóúüñ')
     return clean
 
-def classify_buyer_strict(raw_name: str) -> tuple:
-    clean_raw = normalize_name(raw_name)
-    if not clean_raw: return None, None
+def is_valid_buyer(name):
+    clean = normalize_name(name)
+    if not clean: return False
     for typo, correct in TYPO_CORRECTIONS.items():
-        if typo in clean_raw or clean_raw in typo:
-            clean_raw = normalize_name(correct); break
-    for official in STRATEGIC_BUYERS:
-        if clean_raw == normalize_name(official) or clean_raw in normalize_name(official) or normalize_name(official) in clean_raw:
-            return 'strategic', official
-    for official in TACTICAL_BUYERS:
-        if clean_raw == normalize_name(official) or clean_raw in normalize_name(official) or normalize_name(official) in clean_raw:
-            return 'tactical', official
-    return None, None
+        if typo in clean or clean in typo: clean = normalize_name(correct); break
+    return any(clean in normalize_name(b) or normalize_name(b) in clean for b in ALL_VALID_BUYERS)
+
+def parse_date(val):
+    if pd.isna(val) or str(val).strip() in ['99.99.9999', '2999', '31/12/2999', 'Indefinido', '']:
+        return pd.NaT
+    if isinstance(val, (int, float)):
+        try: return pd.Timestamp('1899-12-30') + pd.Timedelta(days=int(val))
+        except: return pd.NaT
+    try: return pd.to_datetime(str(val).strip(), dayfirst=True, errors='coerce')
+    except: return pd.NaT
+
+def normalize_status(val):
+    if pd.isna(val): return ''
+    s = str(val).strip().lower()
+    s = ''.join(c for c in s if c not in 'áéíóúüñ')
+    return s
 
 # ==============================
-# 🔧 FUNCIONES DE CARGA Y PROCESAMIENTO
+# 🔧 CARGA Y MAPEO INTELIGENTE
 # ==============================
-
-def cargar_pivot_crudo(file_content: bytes) -> pd.DataFrame:
-    """Parsea el Pivot crudo de Ariba saltando metadatos y asignando columnas correctas."""
-    # Leer sin header para inspeccionar
-    df_raw = pd.read_excel(BytesIO(file_content), header=None, engine='openpyxl')
+def load_and_map(file, file_type):
+    xls = pd.ExcelFile(file)
+    sheet = xls.sheet_names[0]
+    df = pd.read_excel(xls, sheet_name=sheet, header=None)
     
-    # Buscar la primera fila que comienza con "CW" (Contrato válido)
-    start_row = None
-    for i in range(len(df_raw)):
-        first_cell = str(df_raw.iloc[i, 0]).strip() if pd.notna(df_raw.iloc[i, 0]) else ''
-        # Buscar contratos que empiecen con CW
-        if first_cell.upper().startswith('CW') and len(first_cell) > 2:
-            start_row = i
-            break
+    # Buscar fila de datos (empieza con CW o contiene ID de contrato)
+    start_idx = None
+    for i in range(len(df)):
+        first = str(df.iloc[i, 0]).strip().upper()
+        if first.startswith('CW') and len(first) > 2:
+            start_idx = i; break
+    if start_idx is None:
+        raise ValueError(f"No se encontraron contratos válidos en {file_type}")
     
-    if start_row is None:
-        # Si no encuentra CW, intentar con cualquier fila que tenga datos válidos
-        for i in range(len(df_raw)):
-            first_cell = str(df_raw.iloc[i, 0]).strip() if pd.notna(df_raw.iloc[i, 0]) else ''
-            if first_cell and not first_cell.lower().startswith(('this', 'query', 'field', 'raw', 'fixed', 'applied', 'bi-', 'organization', 'owner', 'region', 'employee')):
-                start_row = i
-                break
+    df_data = df.iloc[start_idx:].reset_index(drop=True)
+    df_data.columns = df_data.iloc[0]
+    df_data = df_data[1:].reset_index(drop=True)
     
-    if start_row is None:
-        raise ValueError("No se encontraron contratos válidos en el Pivot. Verifica que el archivo contenga datos de Ariba Analysis.")
-    
-    # Leer desde la fila encontrada
-    df = pd.read_excel(BytesIO(file_content), header=None, skiprows=range(start_row), engine='openpyxl')
-    
-    # Asignar nombres de columna estándar basados en la estructura de Ariba
-    # 0:ContractId, 1:ProjectName, 2:BeginDate, 3:Owner, 4:SAPCode, 5:Evergreen, 6:Region, 7:RUT, 8:Supplier, 9:Desc, 10:Effective, 11:Year, 12:Status, 13:Expiration
-    standard_cols = [
-        'ContractId', 'ProjectName', 'BeginDate', 'Owner', 'SAPCode',
-        'IsEvergreen', 'Region', 'RUT', 'Supplier', 'Description',
-        'EffectiveDate', 'Year', 'Status', 'ExpirationDate'
-    ]
-    
-    # Asignar nombres a las primeras 14 columnas
-    for i, col_name in enumerate(standard_cols):
-        if i < len(df.columns):
-            df.rename(columns={df.columns[i]: col_name}, inplace=True)
-    
-    # Limpiar filas vacías
-    df = df.dropna(how='all').reset_index(drop=True)
-    return df
-
-def cargar_consolidado_drive(file_content: bytes) -> pd.DataFrame:
-    """Carga el Consolidado de Contratos del drive."""
-    sheets = pd.read_excel(BytesIO(file_content), sheet_name=None, engine='openpyxl')
-    if 'Consolidado de Contratos' in sheets:
-        df = sheets['Consolidado de Contratos'].dropna(how='all').dropna(axis=1, how='all')
-    else:
-        df = list(sheets.values())[0].dropna(how='all').dropna(axis=1, how='all')
-    df.columns = [str(c).strip() for c in df.columns]
-    return df.reset_index(drop=True)
-
-def procesar_pivot_a_comparar(df_pivot: pd.DataFrame) -> pd.DataFrame:
-    """Procesa el Pivot para comparación."""
-    df = pd.DataFrame()
-    
-    # Mapeo seguro con verificación de existencia
-    if 'ContractId' in df_pivot.columns:
-        df['contrato_ariba'] = df_pivot['ContractId']
-    
-    if 'Owner' in df_pivot.columns:
-        df['comprador_raw'] = df_pivot['Owner']
-    
-    if 'Status' in df_pivot.columns:
-        df['estado_pivot'] = df_pivot['Status']
-    
-    if 'Supplier' in df_pivot.columns:
-        df['proveedor'] = df_pivot['Supplier']
-    
-    if 'Description' in df_pivot.columns:
-        df['descripcion'] = df_pivot['Description']
-    
-    if 'ExpirationDate' in df_pivot.columns:
-        df['fecha_termino'] = df_pivot['ExpirationDate']
-    
-    if 'Region' in df_pivot.columns:
-        df['region'] = df_pivot['Region']
-    
-    # Validación estricta de compradores
-    if 'comprador_raw' in df.columns:
-        raw_owners = df['comprador_raw'].fillna('').astype(str)
-        classified = raw_owners.apply(classify_buyer_strict)
-        df['comprador_estrategico'] = [x[1] if x[0] == 'strategic' else '' for x in classified]
-        df['comprador_tactico'] = [x[1] if x[0] == 'tactical' else '' for x in classified]
-    else:
-        df['comprador_estrategico'] = ''
-        df['comprador_tactico'] = ''
-    
-    # Filtrar solo contratos válidos
-    if 'contrato_ariba' in df.columns:
-        df = df[df['contrato_ariba'].notna() & (df['contrato_ariba'].astype(str).str.strip() != '')]
-        df = df[~df['contrato_ariba'].astype(str).str.lower().str.contains('query|field|this worksheet', na=False)]
-    
-    return df
-
-def procesar_consolidado_a_comparar(df_consol: pd.DataFrame) -> pd.DataFrame:
-    """Procesa el Consolidado para comparación."""
-    df = pd.DataFrame()
-    
-    # Búsqueda flexible de columnas
+    # Mapeo flexible por palabras clave
     col_map = {}
-    for col in df_consol.columns:
-        col_lower = col.lower()
-        if 'contrato' in col_lower and ('ariba' in col_lower or 'sap' in col_lower):
-            col_map['contrato_ariba'] = col
-        elif 'comprador' in col_lower and 'estratégico' in col_lower:
-            col_map['comprador_estrategico'] = col
-        elif 'comprador' in col_lower and 'táctico' in col_lower:
-            col_map['comprador_tactico'] = col
-        elif 'estado' in col_lower and 'contrato' in col_lower:
-            col_map['estado_consol'] = col
-        elif 'proveedor' in col_lower:
-            col_map['proveedor'] = col
-        elif 'fecha' in col_lower and ('término' in col_lower or 'fin' in col_lower or 'expiración' in col_lower):
-            col_map['fecha_termino'] = col
-        elif 'descripción' in col_lower or 'descripcion' in col_lower:
-            col_map['descripcion'] = col
-        elif 'área' in col_lower or 'region' in col_lower:
-            col_map['region'] = col
+    for col in df_data.columns:
+        c = str(col).lower()
+        if 'id de contrato' in c or 'contractid' in c or 'contrato ariba' in c or 'contrato sap' in c:
+            col_map['contrato'] = col
+        elif 'propietario' in c or 'owner' in c or 'comprador' in c:
+            col_map['comprador'] = col
+        elif 'inicio' in c and ('fecha' in c or 'entrada' in c):
+            col_map['inicio'] = col
+        elif 'termino' in c or 'expiracion' in c or 'fin' in c or 'expiración' in c:
+            col_map['fin'] = col
+        elif 'estado' in c:
+            col_map['estado'] = col
+            
+    if 'contrato' not in col_map:
+        raise ValueError(f"No se encontró columna de contrato en {file_type}")
+        
+    df_out = pd.DataFrame()
+    df_out['contrato'] = df_data[col_map['contrato']].astype(str).str.strip()
+    df_out['comprador'] = df_data.get(col_map.get('comprador', ''), '')
+    df_out['inicio'] = df_data.get(col_map.get('inicio', ''), pd.NaT).apply(parse_date)
+    df_out['fin'] = df_data.get(col_map.get('fin', ''), pd.NaT).apply(parse_date)
+    df_out['estado'] = df_data.get(col_map.get('estado', ''), '')
     
-    for target_col, source_col in col_map.items():
-        df[target_col] = df_consol[source_col]
-    
-    if 'contrato_ariba' in df.columns:
-        df = df[df['contrato_ariba'].notna() & (df['contrato_ariba'].astype(str).str.strip() != '')]
-    
-    return df
+    # Filtrar solo compradores oficiales y contratos válidos
+    df_out = df_out[df_out['contrato'].str.startswith('CW') & df_out['comprador'].apply(is_valid_buyer)]
+    df_out['contrato'] = df_out['contrato'].str.upper()
+    df_out = df_out.drop_duplicates(subset=['contrato']).set_index('contrato')
+    return df_out
 
-def comparar_archivos(df_pivot: pd.DataFrame, df_consol: pd.DataFrame) -> pd.DataFrame:
-    """Compara ambos archivos y detecta incongruencias."""
-    df_pivot_proc = procesar_pivot_a_comparar(df_pivot)
-    df_consol_proc = procesar_consolidado_a_comparar(df_consol)
+# ==============================
+# 🔍 COMPARACIÓN
+# ==============================
+def comparar_archivos(df_pivot, df_consol):
+    merged = pd.merge(df_pivot, df_consol, left_index=True, right_index=True, how='outer', suffixes=('_pivot', '_consol'))
     
-    # Verificar que ambos tengan la columna clave
-    if 'contrato_ariba' not in df_pivot_proc.columns or 'contrato_ariba' not in df_consol_proc.columns:
-        raise ValueError("No se encontró la columna 'contrato_ariba' en uno de los archivos procesados.")
+    resultados = []
+    for contrato, row in merged.iterrows():
+        comp_pivot = str(row.get('comprador_pivot', '') or row.get('comprador_consol', '')).strip()
+        if not comp_pivot: continue
+            
+        ini_p, ini_c = row.get('inicio_pivot', pd.NaT), row.get('inicio_consol', pd.NaT)
+        fin_p, fin_c = row.get('fin_pivot', pd.NaT), row.get('fin_consol', pd.NaT)
+        est_p, est_c = str(row.get('estado_pivot', '')).strip(), str(row.get('estado_consol', '')).strip()
         
-    merged = pd.merge(df_pivot_proc, df_consol_proc, on='contrato_ariba', how='outer', 
-                      suffixes=('_pivot', '_consol'), indicator=True)
-    
-    diferencias = []
-    for _, row in merged.iterrows():
-        contrato = row['contrato_ariba']
-        estado_pivot = str(row.get('estado_pivot', '')).strip()
-        estado_consol = str(row.get('estado_consol', '')).strip()
+        diff_ini = ini_p != ini_c
+        diff_fin = fin_p != fin_c
+        diff_est = normalize_status(est_p) != normalize_status(est_c)
         
-        # Obtener comprador
-        comprador_pivot = row.get('comprador_estrategico_pivot', '') or row.get('comprador_tactico_pivot', '')
-        comprador_consol = row.get('comprador_estrategico_consol', '') or row.get('comprador_tactico_consol', '')
-        
-        if pd.notna(comprador_pivot) and comprador_pivot:
-            comprador = comprador_pivot
-        elif pd.notna(comprador_consol) and comprador_consol:
-            comprador = comprador_consol
-        else:
-            continue
-        
-        if estado_pivot != estado_consol and estado_pivot and estado_consol:
-            diferencias.append({
+        if diff_ini or diff_fin or diff_est:
+            accion = "🔄 Actualizar en Consolidado"
+            if pd.isna(ini_c) and pd.isna(fin_c) and not est_c: accion = "📥 Agregar al Consolidado"
+            elif pd.isna(ini_p) and pd.isna(fin_p) and not est_p: accion = "🗑️ Solo existe en Consolidado"
+            
+            resultados.append({
                 'Contrato': contrato,
-                'Comprador': comprador,
-                'Estado en Pivot (Ariba)': estado_pivot,
-                'Estado en Consolidado (Drive)': estado_consol,
-                'Proveedor': row.get('proveedor_pivot') or row.get('proveedor_consol', ''),
-                'Descripción': row.get('descripcion_pivot') or row.get('descripcion_consol', ''),
-                'Fecha Término': str(row.get('fecha_termino_pivot') or row.get('fecha_termino_consol', ''))[:10],
-                'Región': row.get('region_pivot') or row.get('region_consol', ''),
+                'Comprador': comp_pivot,
+                'Inicio (Pivot)': ini_p.strftime('%d/%m/%Y') if pd.notna(ini_p) else '⚠️ Vacío',
+                'Inicio (Consol)': ini_c.strftime('%d/%m/%Y') if pd.notna(ini_c) else '⚠️ Vacío',
+                '¿Coincide Inicio?': '✅ Sí' if not diff_ini else '❌ No',
+                'Fin (Pivot)': fin_p.strftime('%d/%m/%Y') if pd.notna(fin_p) else '⚠️ Vacío',
+                'Fin (Consol)': fin_c.strftime('%d/%m/%Y') if pd.notna(fin_c) else '⚠️ Vacío',
+                '¿Coincide Fin?': '✅ Sí' if not diff_fin else '❌ No',
+                'Estado (Pivot)': est_p if est_p else '⚠️ Vacío',
+                'Estado (Consol)': est_c if est_c else '⚠️ Vacío',
+                '¿Coincide Estado?': '✅ Sí' if not diff_est else '❌ No',
+                'Acción': accion
             })
-    
-    return pd.DataFrame(diferencias)
+            
+    return pd.DataFrame(resultados)
 
 # ==============================
-# 📊 FUNCIONES DE VISUALIZACIÓN
+# 🎛️ INTERFAZ
 # ==============================
+st.title("🔍 Comparador de Contratos: Pivot vs Consolidado")
+st.caption("Detecta diferencias en Fechas y Estado para actualizar tu base de datos")
 
-def crear_kpi_comparacion(df_diff: pd.DataFrame) -> None:
-    total = len(df_diff)
-    por_comprador = df_diff.groupby('Comprador').size().to_dict() if not df_diff.empty else {}
-    k1, k2, k3 = st.columns(3)
-    k1.metric("🔍 Total Incongruencias", f"{total:,}")
-    k2.metric("👥 Compradores Afectados", f"{len(por_comprador):,}")
-    k3.metric("📋 Contratos a Actualizar", f"{total:,}", delta_color="inverse")
+c1, c2 = st.columns(2)
+with c1:
+    file_pivot = st.file_uploader("📤 Subir Pivot Ariba (Crudo)", type=['xlsx', 'xls'])
+with c2:
+    file_consol = st.file_uploader("📤 Subir Consolidado de Contratos", type=['xlsx', 'xls'])
 
-def crear_grafico_por_comprador(df_diff: pd.DataFrame) -> go.Figure:
-    if df_diff.empty:
-        return go.Figure()
-    datos = df_diff['Comprador'].value_counts().reset_index()
-    datos.columns = ['Comprador', 'Cantidad']
-    fig = px.bar(datos, x='Cantidad', y='Comprador', orientation='h',
-                 title='👥 Incongruencias por Comprador',
-                 color='Cantidad', color_continuous_scale='Reds')
-    fig.update_layout(yaxis={'categoryorder': 'total ascending'}, height=400)
-    return fig
-
-def crear_grafico_estados(df_diff: pd.DataFrame) -> go.Figure:
-    if df_diff.empty:
-        return go.Figure()
-    datos = df_diff['Estado en Pivot (Ariba)'].value_counts().reset_index()
-    datos.columns = ['Estado en Ariba', 'Cantidad']
-    fig = px.pie(datos, values='Cantidad', names='Estado en Ariba',
-                 title='📊 Distribución de Estados en Pivot',
-                 hole=0.4, color_discrete_sequence=px.colors.qualitative.Set3)
-    fig.update_traces(textinfo='percent+label')
-    return fig
-
-# ==============================
-# 🎛️ INTERFAZ PRINCIPAL
-# ==============================
-
-st.title("🔍 Comparador de Contratos - Pivot vs Consolidado")
-st.markdown("**Softys Chile** · Detecta incongruencias entre Ariba y el Drive")
-st.divider()
-
-with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/1/14/Softys_logo.svg/320px-Softys_logo.svg.png", use_container_width=True)
-    st.header("📁 Carga de Archivos")
-    st.info("💡 Sube ambos archivos para comparar:")
-    pivot_file = st.file_uploader("1️⃣ Pivot crudo de Ariba", type=['xlsx', 'xls'], key='pivot')
-    consol_file = st.file_uploader("2️⃣ Consolidado del Drive", type=['xlsx', 'xls'], key='consol')
-    st.divider()
-    st.caption("🔒 Los archivos se procesan localmente.")
-
-if not pivot_file or not consol_file:
-    st.info("👆 Sube **ambos archivos** para comenzar la comparación.")
-    st.markdown("""
-    ### ¿Qué hace esta herramienta?
-    - 🔍 **Compara** el estado de los contratos entre Ariba (Pivot) y el Consolidado del Drive
-    - 📊 **Identifica** incongruencias donde los estados no coinciden
-    - 👥 **Filtra** por comprador estratégico/táctico
-    - 📥 **Exporta** lista de contratos a actualizar
-    
-    > **Importante:** Solo se consideran compradores de la lista maestra oficial.
-    """)
-    st.stop()
-
-if pivot_file.size > MAX_FILE_SIZE_BYTES or consol_file.size > MAX_FILE_SIZE_BYTES:
-    st.error("❌ Archivo demasiado grande (máx. 50 MB).")
-    st.stop()
-
-try:
+if file_pivot and file_consol:
     with st.spinner("🔄 Procesando y comparando archivos..."):
-        pivot_content = pivot_file.read()
-        consol_content = consol_file.read()
-        df_pivot = cargar_pivot_crudo(pivot_content)
-        df_consol = cargar_consolidado_drive(consol_content)
-        df_diferencias = comparar_archivos(df_pivot, df_consol)
-except Exception as e:
-    st.error(f"❌ Error al procesar: {str(e)}")
-    st.stop()
-
-if df_diferencias.empty:
-    st.success("✅ ¡Excelente! No se encontraron incongruencias entre los archivos.")
-    st.markdown("Los estados de los contratos en el Pivot de Ariba y el Consolidado del Drive están sincronizados.")
-    st.stop()
-
-# ==============================
-# 📊 RESULTADOS
-# ==============================
-
-st.subheader("📊 Resumen de Incongruencias")
-crear_kpi_comparacion(df_diferencias)
-col1, col2 = st.columns(2)
-with col1:
-    st.plotly_chart(crear_grafico_por_comprador(df_diferencias), use_container_width=True)
-with col2:
-    st.plotly_chart(crear_grafico_estados(df_diferencias), use_container_width=True)
-
-# ==============================
-# 🎛️ FILTROS
-# ==============================
-
-st.divider()
-st.subheader("🎛️ Filtrar por Comprador")
-compradores = ['Todos'] + sorted(df_diferencias['Comprador'].dropna().unique().astype(str).tolist())
-comprador_sel = st.selectbox("Seleccionar Comprador", compradores)
-df_filtrado = df_diferencias.copy()
-if comprador_sel != 'Todos':
-    df_filtrado = df_diferencias[df_diferencias['Comprador'] == comprador_sel]
-
-# ==============================
-# 📋 TABLA DE DIFERENCIAS
-# ==============================
-
-st.divider()
-st.subheader(f"📋 Contratos con Incongruencias{' - ' + comprador_sel if comprador_sel != 'Todos' else ''}")
-st.markdown(f"**Total:** {len(df_filtrado)} contratos requieren actualización en el Drive")
-
-if not df_filtrado.empty:
-    st.dataframe(df_filtrado, use_container_width=True, height=400)
-
-# ==============================
-# 📥 EXPORTACIÓN
-# ==============================
-
-st.divider()
-st.subheader("📥 Exportar Resultados")
-col1, col2 = st.columns(2)
-with col1:
-    csv_data = df_filtrado.to_csv(index=False).encode('utf-8-sig')
-    st.download_button(
-        label="💾 Descargar CSV",
-        data=csv_data,
-        file_name=f"incongruencias_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
-with col2:
-    excel_data = df_filtrado.to_excel(index=False, engine='openpyxl')
-    st.download_button(
-        label="📊 Descargar Excel",
-        data=excel_data,
-        file_name=f"incongruencias_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
-    )
-
-# ==============================
-# ℹ️ FOOTER
-# ==============================
-
-st.divider()
-st.caption(f"""
-🔹 Comparación generada: {datetime.now().strftime('%d/%m/%Y %H:%M')}  
-🔹 **Fuente Pivot:** {len(df_pivot)} contratos  
-🔹 **Fuente Consolidado:** {len(df_consol)} contratos  
-🔹 **Incongruencias detectadas:** {len(df_diferencias)} contratos  
-🔹 **Filtro aplicado:** {comprador_sel}
-""")
+        try:
+            df_p = load_and_map(file_pivot, "Pivot")
+            df_c = load_and_map(file_consol, "Consolidado")
+            df_diff = comparar_archivos(df_p, df_c)
+            
+            total = len(df_diff)
+            solo_pivot = len(df_diff[df_diff['Acción'].str.contains('Agregar')])
+            solo_consol = len(df_diff[df_diff['Acción'].str.contains('Solo existe')])
+            diferencias = total - solo_pivot - solo_consol
+            
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("🔍 Total Comparados", f"{total:,}")
+            k2.metric("❌ Diferencias detectadas", f"{diferencias:,}")
+            k3.metric("📥 Nuevos en Pivot", f"{solo_pivot:,}")
+            k4.metric("🗑️ Solo en Consolidado", f"{solo_consol:,}")
+            
+            st.divider()
+            st.subheader("📋 Contratos que requieren actualización")
+            
+            if not df_diff.empty:
+                def color_diff(val):
+                    if '❌' in str(val): return 'background-color: #fff3cd; color: #856404;'
+                    if '🔄' in str(val) or '📥' in str(val): return 'background-color: #d4edda; color: #155724;'
+                    return ''
+                
+                st.dataframe(
+                    df_diff.style.applymap(color_diff, subset=['¿Coincide Inicio?', '¿Coincide Fin?', '¿Coincide Estado?', 'Acción']),
+                    use_container_width=True, height=400
+                )
+                
+                csv = df_diff.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("💾 Descargar reporte de diferencias (CSV)", csv, "diferencias_contratos.csv", "text/csv")
+            else:
+                st.success("✅ ¡Perfecto! No hay diferencias. Ambos archivos están sincronizados.")
+                
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+else:
+    st.info("👆 Sube ambos archivos para comenzar la comparación.")
+    
