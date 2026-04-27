@@ -150,82 +150,80 @@ def limpiar_monto(valor) -> float:
         return 0.0
 
 def cargar_pivot_crudo(file_content: bytes) -> pd.DataFrame:
-    """
-    Parsea el Pivot crudo de Ariba con estructura real:
-    - Salta filas de metadata iniciales
-    - Detecta automáticamente la fila de headers buscando 'ContractId'
-    - Retorna DataFrame limpio con nombres de columna correctos
-    """
-    # Leer primeras 50 filas para detectar estructura
+    """Parsea el Pivot crudo de Ariba con estructura real."""
     df_scan = pd.read_excel(BytesIO(file_content), header=None, nrows=50, engine='openpyxl')
     
-    # Buscar fila donde la primera columna válida sea 'ContractId' o similar
+    # Buscar fila donde aparezca 'ContractId' o 'Raw_Field_Names'
     header_row = None
     for i in range(len(df_scan)):
-        first_val = str(df_scan.iloc[i, 0]).strip() if pd.notna(df_scan.iloc[i, 0]) else ''
-        if first_val.startswith('CW') or 'contractid' in first_val.lower():
+        row_str = ' '.join(str(v).lower() for v in df_scan.iloc[i] if pd.notna(df_scan.iloc[i]))
+        if 'contractid' in row_str or 'raw_field_names' in row_str:
             header_row = i
             break
     
     if header_row is None:
-        # Fallback: intentar leer con header en fila 2 (estructura típica de Ariba)
+        # Fallback: intentar leer con header en fila 2
         try:
             df = pd.read_excel(BytesIO(file_content), header=2, engine='openpyxl')
             df.columns = [str(c).strip() for c in df.columns]
             return df.dropna(how='all').reset_index(drop=True)
         except:
-            raise ValueError("No se pudo detectar automáticamente la fila de encabezados. Verifica que el archivo sea un export válido de Ariba Analysis.")
+            raise ValueError("No se pudo detectar la fila de encabezados.")
     
-    # Leer datos usando la fila detectada como header
-    df = pd.read_excel(BytesIO(file_content), header=header_row, engine='openpyxl')
-    df.columns = [str(c).strip() for c in df.columns]
+    # Si encontramos Raw_Field_Names, parsear los headers concatenados
+    raw_headers = None
+    for col in range(df_scan.shape[1]):
+        val = df_scan.iloc[header_row, col]
+        if pd.notna(val) and 'ContractId' in str(val):
+            raw_headers = str(val)
+            break
     
-    # Limpiar filas vacías y resetear índice
-    df = df.dropna(how='all').reset_index(drop=True)
+    if raw_headers and ',' in raw_headers:
+        # Headers concatenados por coma
+        column_names = [c.strip() for c in raw_headers.split(',') if c.strip()]
+        df_data = pd.read_excel(BytesIO(file_content), header=None, skiprows=range(header_row + 1), engine='openpyxl')
+        if len(column_names) <= df_data.shape[1]:
+            df_data.columns = column_names + [f'Extra_{i}' for i in range(len(column_names), df_data.shape[1])]
+        else:
+            df_data.columns = column_names[:df_data.shape[1]]
+        df = df_data.dropna(how='all').reset_index(drop=True)
+    else:
+        # Headers en filas normales
+        df = pd.read_excel(BytesIO(file_content), header=header_row, engine='openpyxl')
+        df.columns = [str(c).strip() for c in df.columns]
+        df = df.dropna(how='all').reset_index(drop=True)
     
     return df
 
 def transformar_pivot_a_consolidado(df_pivot: pd.DataFrame) -> pd.DataFrame:
-    """
-    Transforma el Pivot crudo al formato esperado por el dashboard.
-    """
-    # Mapeo de campos Ariba → Consolidado (nombres reales del Pivot)
+    """Transforma el Pivot crudo al formato esperado por el dashboard."""
+    # Mapeo robusto con fallbacks
     ARIBA_MAP = {
-        # Identificadores
         'ContractId': 'contrato_ariba',
         'ProjectInfo.ProjectName': 'descripcion',
-        'Project Name': 'descripcion',  # Variación común
         'Owner.UserName': 'comprador_estrategico_raw',
-        'Owner': 'comprador_estrategico_raw',  # Variación
+        'Owner': 'comprador_estrategico_raw',
         'ContractStatus': 'estado_contrato',
-        'Status': 'estado_contrato',  # Variación
-        
-        # Proveedor
+        'Status': 'estado_contrato',
         'UF_string11': 'rut',
-        'Rut': 'rut',  # Variación
+        'Rut': 'rut',
         'UF_string10': 'cod_sap',
-        'Código': 'cod_sap',  # Variación
+        'Código': 'cod_sap',
         'AffectedParties.CommonSupplierName': 'proveedor',
-        'Supplier': 'proveedor',  # Variación
-        'Proveedor': 'proveedor',  # Variación
-        
-        # Fechas
+        'Supplier': 'proveedor',
         'EffectiveDate.Day': 'fecha_inicio',
-        'Fecha Inicio': 'fecha_inicio',  # Variación
+        'BeginDate.Day': 'fecha_inicio',
         'ExpirationDate.Day': 'fecha_termino',
-        'Fecha Fin': 'fecha_termino',  # Variación
         'EndDate.Year': 'anio_fin',
-        
-        # Otros
         'Description': 'descripcion_alt',
         'Region.RegionNameL2': 'region',
-        'Region': 'region',  # Variación
+        'Region': 'region',
         'IsEvergreen': 'es_indefinido_raw',
-        'Indefinido': 'es_indefinido_raw',  # Variación
+        'Indefinido': 'es_indefinido_raw',
         'UF_boolean1': 'aplica_garantia',
-        'Garantía': 'aplica_garantia',  # Variación
+        'Garantía': 'aplica_garantia',
         'sum(Amount)': 'monto_contrato',
-        'Monto': 'monto_contrato',  # Variación
+        'Monto': 'monto_contrato',
     }
     
     df = pd.DataFrame()
@@ -233,33 +231,37 @@ def transformar_pivot_a_consolidado(df_pivot: pd.DataFrame) -> pd.DataFrame:
         if ariba_col in df_pivot.columns and target_col not in df.columns:
             df[target_col] = df_pivot[ariba_col].copy()
     
+    # Crear columnas faltantes con valores por defecto
+    for col in ['contrato_ariba', 'descripcion', 'comprador_estrategico_raw', 'estado_contrato', 
+                'rut', 'cod_sap', 'proveedor', 'fecha_inicio', 'fecha_termino', 'region', 
+                'es_indefinido_raw', 'aplica_garantia', 'monto_contrato']:
+        if col not in df.columns:
+            df[col] = ''
+    
     # Validación estricta de compradores
-    if 'comprador_estrategico_raw' in df.columns:
-        raw_owners = df['comprador_estrategico_raw'].fillna('').astype(str)
-        classified = raw_owners.apply(classify_buyer_strict)
-        df['comprador_estrategico'] = [x[1] if x[0] == 'strategic' else '' for x in classified]
-        df['comprador_tactico'] = [x[1] if x[0] == 'tactical' else '' for x in classified]
-    else:
-        df['comprador_estrategico'] = ''
-        df['comprador_tactico'] = ''
+    raw_owners = df['comprador_estrategico_raw'].fillna('').astype(str)
+    classified = raw_owners.apply(classify_buyer_strict)
+    df['comprador_estrategico'] = [x[1] if x[0] == 'strategic' else '' for x in classified]
+    df['comprador_tactico'] = [x[1] if x[0] == 'tactical' else '' for x in classified]
     
     # 🗑️ Eliminar filas sin compradores válidos
     mask_valid_buyer = (df['comprador_estrategico'] != '') | (df['comprador_tactico'] != '')
     df = df[mask_valid_buyer].reset_index(drop=True)
     
     # 🚫 Eliminar contratos Cerrados
-    if 'estado_contrato' in df.columns:
-        mask_no_cerrado = ~df['estado_contrato'].astype(str).str.strip().str.lower().isin(['cerrado', 'cerrados'])
-        df = df[mask_no_cerrado].reset_index(drop=True)
+    mask_no_cerrado = ~df['estado_contrato'].astype(str).str.strip().str.lower().isin(['cerrado', 'cerrados'])
+    df = df[mask_no_cerrado].reset_index(drop=True)
     
     # 🛡️ Copiar Estratégico a Táctico si está vacío
     mask_tactical_empty = (df['comprador_tactico'] == '') & (df['comprador_estrategico'] != '')
     df.loc[mask_tactical_empty, 'comprador_tactico'] = df.loc[mask_tactical_empty, 'comprador_estrategico']
     
-    # Formatear fechas
+    # Formatear fechas (con manejo de errores)
     for date_col in ['fecha_inicio', 'fecha_termino']:
         if date_col in df.columns:
             df[date_col] = df[date_col].apply(parse_fecha)
+        else:
+            df[date_col] = pd.NaT
     
     # Días para vencimiento
     hoy = pd.Timestamp.today().normalize()
@@ -298,6 +300,8 @@ def transformar_pivot_a_consolidado(df_pivot: pd.DataFrame) -> pd.DataFrame:
     # Monto
     if 'monto_contrato' in df.columns:
         df['monto_contrato_num'] = pd.to_numeric(df['monto_contrato'], errors='coerce').fillna(0)
+    else:
+        df['monto_contrato_num'] = 0
     
     # Limpiar comprador (quitar filas sin contrato)
     df = df[df['contrato_ariba'].notna() & (df['contrato_ariba'].astype(str).str.strip() != '')]
@@ -321,10 +325,9 @@ def clasificar_riesgo_contrato(estado: str, dias_restantes, es_indefinido: bool 
 @st.cache_data(show_spinner=False)
 def cargar_y_procesar_contratos(file_hash: str, file_content: bytes, usar_pivot_crudo: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
     if usar_pivot_crudo:
-        # Parsear Pivot crudo de Ariba
         df_pivot = cargar_pivot_crudo(file_content)
         df = transformar_pivot_a_consolidado(df_pivot)
-        df_bg = pd.DataFrame()  # El Pivot crudo no trae hoja BG separada
+        df_bg = pd.DataFrame()
         reporte = {
             'fuente_principal': 'Pivot Ariba (crudo)',
             'contratos_totales': len(df),
@@ -335,7 +338,7 @@ def cargar_y_procesar_contratos(file_hash: str, file_content: bytes, usar_pivot_
         }
         return df, df_bg, reporte
     else:
-        # Modo legacy: archivo ya limpio con hojas Info Ariba, Consolidado, etc.
+        # Modo legacy
         sheets = pd.read_excel(BytesIO(file_content), sheet_name=None, engine='openpyxl')
         if 'Info Ariba' not in sheets:
             raise ValueError("No se encontró la hoja 'Info Ariba' en el archivo.")
