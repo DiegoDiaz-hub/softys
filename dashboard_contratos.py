@@ -19,6 +19,7 @@ st.markdown("""
     .diff-mismatch { color: #e74c3c; font-weight: bold; background: #fff3cd; padding: 2px 6px; border-radius: 4px; }
     .metric-card { background: linear-gradient(135deg, #1e3a5f, #2d5986); border-radius: 10px; padding: 15px; color: white; text-align: center; }
     div[data-testid="stMetricValue"] { font-size: 1.8rem; }
+    .stDataFrame { border: 1px solid #e0e0e0; border-radius: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -77,76 +78,140 @@ def normalize_status(val):
     return s
 
 # ==============================
-# 🔧 CARGA Y MAPEO INTELIGENTE
+# 🔧 CARGA Y MAPEO ROBUSTO
 # ==============================
-def load_and_map(file, file_type):
-    xls = pd.ExcelFile(file)
-    sheet = xls.sheet_names[0]
-    df = pd.read_excel(xls, sheet_name=sheet, header=None)
+def cargar_pivot_crudo(file_content):
+    """Carga el Pivot crudo de Ariba buscando la hoja y fila de datos correcta."""
+    xls = pd.ExcelFile(file_content)
     
-    # Buscar fila de datos (empieza con CW o contiene ID de contrato)
-    start_idx = None
-    for i in range(len(df)):
-        first = str(df.iloc[i, 0]).strip().upper()
-        if first.startswith('CW') and len(first) > 2:
-            start_idx = i; break
-    if start_idx is None:
-        raise ValueError(f"No se encontraron contratos válidos en {file_type}")
+    # 1. Identificar la hoja de datos
+    sheet_names = xls.sheet_names
+    data_sheet = None
     
-    df_data = df.iloc[start_idx:].reset_index(drop=True)
-    df_data.columns = df_data.iloc[0]
-    df_data = df_data[1:].reset_index(drop=True)
+    if 'Data' in sheet_names:
+        data_sheet = 'Data'
+    elif len(sheet_names) > 0:
+        # Si no hay 'Data', tomar la hoja con más filas/columnas (asumiendo que es la de datos)
+        max_cells = 0
+        for s in sheet_names:
+            df_temp = pd.read_excel(xls, sheet_name=s, nrows=10)
+            if df_temp.size > max_cells:
+                max_cells = df_temp.size
+                data_sheet = s
     
-    # Mapeo flexible por palabras clave
-    col_map = {}
-    for col in df_data.columns:
-        c = str(col).lower()
-        if 'id de contrato' in c or 'contractid' in c or 'contrato ariba' in c or 'contrato sap' in c:
-            col_map['contrato'] = col
-        elif 'propietario' in c or 'owner' in c or 'comprador' in c:
-            col_map['comprador'] = col
-        elif 'inicio' in c and ('fecha' in c or 'entrada' in c):
-            col_map['inicio'] = col
-        elif 'termino' in c or 'expiracion' in c or 'fin' in c or 'expiración' in c:
-            col_map['fin'] = col
-        elif 'estado' in c:
-            col_map['estado'] = col
-            
-    if 'contrato' not in col_map:
-        raise ValueError(f"No se encontró columna de contrato en {file_type}")
+    if data_sheet is None:
+        raise ValueError("No se encontró ninguna hoja con datos en el archivo Pivot.")
+
+    # 2. Leer sin header para encontrar la fila de inicio
+    df_raw = pd.read_excel(xls, sheet_name=data_sheet, header=None)
+    
+    start_row = None
+    # Buscar la primera fila donde la primera celda empieza con 'CW'
+    for i in range(len(df_raw)):
+        val = str(df_raw.iloc[i, 0]).strip().upper() if pd.notna(df_raw.iloc[i, 0]) else ''
+        if val.startswith('CW') and len(val) > 2:
+            start_row = i
+            break
+    
+    if start_row is None:
+        raise ValueError(f"No se encontraron contratos válidos (CW...) en la hoja '{data_sheet}'.")
+    
+    # 3. Leer datos desde la fila encontrada
+    # Asumimos que la fila anterior (start_row - 1) podría ser el header, pero para ser seguros
+    # leemos desde start_row sin header y asignamos nombres manualmente.
+    df_data = pd.read_excel(xls, sheet_name=data_sheet, header=None, skiprows=range(start_row))
+    
+    # Asignar nombres de columnas basados en la posición conocida del export de Ariba
+    # 0: Contrato, 3: Owner, 10: Fecha Inicio, 12: Estado, 13: Fecha Fin
+    df_data.columns = [
+        'contrato', 'desc_1', 'desc_2', 'comprador', 'desc_4', 'desc_5', 'desc_6', 
+        'desc_7', 'desc_8', 'desc_9', 'fecha_inicio', 'desc_11', 'estado', 'fecha_fin'
+    ] + [f'extra_{i}' for i in range(14, len(df_data.columns))]
+    
+    # Seleccionar solo columnas de interés
+    df_out = df_data[['contrato', 'comprador', 'fecha_inicio', 'estado', 'fecha_fin']].copy()
+    
+    # Limpieza y filtrado
+    df_out['contrato'] = df_out['contrato'].astype(str).str.strip().str.upper()
+    df_out = df_out[df_out['contrato'].str.startswith('CW') & df_out['contrato'].str.len() > 2]
+    df_out = df_out[df_out['comprador'].apply(is_valid_buyer)]
+    df_out = df_out.drop_duplicates(subset=['contrato'])
+    
+    # Parsear fechas
+    df_out['fecha_inicio'] = df_out['fecha_inicio'].apply(parse_date)
+    df_out['fecha_fin'] = df_out['fecha_fin'].apply(parse_date)
+    
+    return df_out.set_index('contrato')
+
+def cargar_consolidado(file_content):
+    """Carga el Consolidado de Contratos del drive."""
+    xls = pd.ExcelFile(file_content)
+    sheet_names = xls.sheet_names
+    
+    # Buscar la hoja de Consolidado
+    target_sheet = None
+    for s in sheet_names:
+        if 'consolidado' in s.lower() or 'contrato' in s.lower():
+            target_sheet = s
+            break
+    if target_sheet is None and len(sheet_names) > 0:
+        target_sheet = sheet_names[0] # Fallback a primera hoja
         
-    df_out = pd.DataFrame()
-    df_out['contrato'] = df_data[col_map['contrato']].astype(str).str.strip()
-    df_out['comprador'] = df_data.get(col_map.get('comprador', ''), '')
-    df_out['inicio'] = df_data.get(col_map.get('inicio', ''), pd.NaT).apply(parse_date)
-    df_out['fin'] = df_data.get(col_map.get('fin', ''), pd.NaT).apply(parse_date)
-    df_out['estado'] = df_data.get(col_map.get('estado', ''), '')
+    df = pd.read_excel(xls, sheet_name=target_sheet)
     
-    # Filtrar solo compradores oficiales y contratos válidos
-    df_out = df_out[df_out['contrato'].str.startswith('CW') & df_out['comprador'].apply(is_valid_buyer)]
-    df_out['contrato'] = df_out['contrato'].str.upper()
-    df_out = df_out.drop_duplicates(subset=['contrato']).set_index('contrato')
-    return df_out
+    # Mapeo flexible de columnas
+    col_map = {}
+    for col in df.columns:
+        c = str(col).lower()
+        if 'contrato' in c and ('ariba' in c or 'sap' in c):
+            col_map['contrato'] = col
+        elif 'comprador' in c and 'estratégico' in c:
+            col_map['comprador'] = col
+        elif 'estado' in c and 'contrato' in c:
+            col_map['estado'] = col
+        elif 'fecha' in c and ('término' in c or 'fin' in c or 'expiración' in c):
+            col_map['fin'] = col
+        elif 'fecha' in c and 'inicio' in c:
+            col_map['inicio'] = col
+            
+    df_out = pd.DataFrame()
+    df_out['contrato'] = df[col_map.get('contrato', df.columns[0])].astype(str).str.strip().str.upper()
+    df_out['comprador'] = df[col_map.get('comprador', '')] if 'comprador' in col_map else ''
+    df_out['inicio'] = df[col_map.get('inicio', '')].apply(parse_date) if 'inicio' in col_map else pd.NaT
+    df_out['fin'] = df[col_map.get('fin', '')].apply(parse_date) if 'fin' in col_map else pd.NaT
+    df_out['estado'] = df[col_map.get('estado', '')] if 'estado' in col_map else ''
+    
+    # Filtrar
+    df_out = df_out[df_out['contrato'].str.startswith('CW') & df_out['contrato'].str.len() > 2]
+    df_out = df_out[df_out['comprador'].apply(is_valid_buyer)]
+    df_out = df_out.drop_duplicates(subset=['contrato'])
+    
+    return df_out.set_index('contrato')
 
 # ==============================
 # 🔍 COMPARACIÓN
 # ==============================
 def comparar_archivos(df_pivot, df_consol):
+    # Merge outer para ver todos los contratos de ambos lados
     merged = pd.merge(df_pivot, df_consol, left_index=True, right_index=True, how='outer', suffixes=('_pivot', '_consol'))
     
     resultados = []
     for contrato, row in merged.iterrows():
         comp_pivot = str(row.get('comprador_pivot', '') or row.get('comprador_consol', '')).strip()
-        if not comp_pivot: continue
+        # Si no hay comprador válido en ninguno de los dos, saltar (aunque el filtro inicial debería haberlo evitado)
+        if not comp_pivot and not is_valid_buyer(str(row.get('comprador_pivot', '')) + str(row.get('comprador_consol', ''))):
+            continue
             
         ini_p, ini_c = row.get('inicio_pivot', pd.NaT), row.get('inicio_consol', pd.NaT)
         fin_p, fin_c = row.get('fin_pivot', pd.NaT), row.get('fin_consol', pd.NaT)
         est_p, est_c = str(row.get('estado_pivot', '')).strip(), str(row.get('estado_consol', '')).strip()
         
+        # Comparaciones
         diff_ini = ini_p != ini_c
         diff_fin = fin_p != fin_c
         diff_est = normalize_status(est_p) != normalize_status(est_c)
         
+        # Solo reportar si hay diferencia
         if diff_ini or diff_fin or diff_est:
             accion = "🔄 Actualizar en Consolidado"
             if pd.isna(ini_c) and pd.isna(fin_c) and not est_c: accion = "📥 Agregar al Consolidado"
@@ -154,7 +219,7 @@ def comparar_archivos(df_pivot, df_consol):
             
             resultados.append({
                 'Contrato': contrato,
-                'Comprador': comp_pivot,
+                'Comprador': comp_pivot if comp_pivot else 'Desconocido',
                 'Inicio (Pivot)': ini_p.strftime('%d/%m/%Y') if pd.notna(ini_p) else '⚠️ Vacío',
                 'Inicio (Consol)': ini_c.strftime('%d/%m/%Y') if pd.notna(ini_c) else '⚠️ Vacío',
                 '¿Coincide Inicio?': '✅ Sí' if not diff_ini else '❌ No',
@@ -184,8 +249,8 @@ with c2:
 if file_pivot and file_consol:
     with st.spinner("🔄 Procesando y comparando archivos..."):
         try:
-            df_p = load_and_map(file_pivot, "Pivot")
-            df_c = load_and_map(file_consol, "Consolidado")
+            df_p = cargar_pivot_crudo(file_pivot)
+            df_c = cargar_consolidado(file_consol)
             df_diff = comparar_archivos(df_p, df_c)
             
             total = len(df_diff)
@@ -220,6 +285,6 @@ if file_pivot and file_consol:
                 
         except Exception as e:
             st.error(f"❌ Error: {str(e)}")
+            st.info("💡 Verifica que estés subiendo los archivos correctos: el Pivot crudo de Ariba y el Consolidado de Contratos.")
 else:
     st.info("👆 Sube ambos archivos para comenzar la comparación.")
-    
