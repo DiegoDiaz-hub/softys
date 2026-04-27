@@ -149,53 +149,57 @@ def limpiar_monto(valor) -> float:
     except:
         return 0.0
 
-def load_pivot_ariba(file_content: bytes) -> pd.DataFrame:
+def cargar_pivot_crudo(file_content: bytes) -> pd.DataFrame:
     """
-    Carga el Pivot de Ariba detectando automáticamente la fila con headers concatenados.
+    Parsea el Pivot crudo de Ariba:
+    - Detecta la fila con 'Raw_Field_Names' que tiene los headers concatenados
+    - Extrae y separa los nombres de columnas reales
+    - Lee los datos saltando metadata
+    - Retorna DataFrame limpio listo para mapeo
     """
-    # Leer primeras 100 filas para detectar estructura
+    # Leer primeras filas para detectar estructura
     df_raw = pd.read_excel(BytesIO(file_content), header=None, nrows=100, engine='openpyxl')
     
-    # Buscar fila que contenga 'ContractId' (indicador de headers reales)
+    # Buscar fila con 'Raw_Field_Names'
     header_row_idx = None
-    header_col_idx = None
-    
-    for i in range(len(df_raw)):
-        for j in range(min(10, df_raw.shape[1])):  # Buscar en primeras 10 columnas
-            cell_val = str(df_raw.iloc[i, j]).lower() if pd.notna(df_raw.iloc[i, j]) else ''
-            if 'contractid' in cell_val and ',' in cell_val:
-                header_row_idx = i
-                header_col_idx = j
-                break
-        if header_row_idx is not None:
+    for i, row in df_raw.iterrows():
+        row_str = ' '.join(str(v).lower() for v in row if pd.notna(v))
+        if 'raw_field_names' in row_str:
+            header_row_idx = i
             break
     
     if header_row_idx is None:
-        # Fallback: intentar leer directamente asumiendo estructura típica
-        try:
-            df = pd.read_excel(BytesIO(file_content), header=12, engine='openpyxl')
-            df.columns = [str(c).strip() for c in df.columns]
-            return df.dropna(how='all').reset_index(drop=True)
-        except:
-            raise ValueError("No se pudo detectar automáticamente la fila de encabezados. Verifica que el archivo sea un export válido de Ariba Analysis.")
+        raise ValueError("No se encontró la fila 'Raw_Field_Names' con los encabezados del Pivot de Ariba.")
     
-    # Extraer y parsear los nombres de columnas desde la celda concatenada
-    raw_headers = str(df_raw.iloc[header_row_idx, header_col_idx])
-    column_names = [c.strip() for c in raw_headers.split(',') if c.strip()]
+    # Extraer y parsear nombres de columnas desde la celda concatenada
+    raw_headers_cell = None
+    for col in range(df_raw.shape[1]):
+        val = df_raw.iloc[header_row_idx, col]
+        if pd.notna(val) and 'ContractId' in str(val):
+            raw_headers_cell = val
+            break
+    
+    if raw_headers_cell is None:
+        raise ValueError("No se pudo extraer la lista de campos desde 'Raw_Field_Names'.")
+    
+    # Separar por coma y limpiar
+    column_names = [c.strip() for c in str(raw_headers_cell).split(',') if c.strip()]
     
     # Leer datos reales (saltando filas de metadata)
-    df_data = pd.read_excel(BytesIO(file_content), header=None, skiprows=range(header_row_idx + 1), engine='openpyxl')
+    data_start_row = header_row_idx + 1
+    df_data = pd.read_excel(BytesIO(file_content), header=None, skiprows=range(data_start_row), engine='openpyxl')
     
     # Asignar nombres de columna
     if len(column_names) <= df_data.shape[1]:
-        df_data.columns = column_names + [f'Extra_{i}' for i in range(len(column_names), df_data.shape[1])]
+        df_data.columns = column_names + [f'Unnamed_{i}' for i in range(len(column_names), df_data.shape[1])]
     else:
         df_data.columns = column_names[:df_data.shape[1]]
     
-    # Limpiar filas vacías
+    # Limpiar filas vacías y resetear índice
     df_data = df_data.dropna(how='all').reset_index(drop=True)
     
     return df_data
+
 def transformar_pivot_a_consolidado(df_pivot: pd.DataFrame) -> pd.DataFrame:
     """
     Transforma el Pivot crudo al formato esperado por el dashboard:
