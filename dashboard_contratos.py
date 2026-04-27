@@ -61,12 +61,6 @@ st.markdown("""
         font-size: 0.9rem;
     }
     div[data-testid="stMetricValue"] { font-size: 1.8rem; }
-    .diff-highlight {
-        background-color: #fff3cd;
-        padding: 2px 6px;
-        border-radius: 4px;
-        font-weight: bold;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -82,7 +76,7 @@ STRATEGIC_BUYERS = {
     'Patricio Espinoza', 'Jorge Urrutia', 'Bárbara García', 'Claudio Berrios',
     'Martina Fuentes', 'Joseph España', 'Michelle Palma', 'Juan Figueroa',
     'Magdalena Farias', 'Denisse Andrea Gonzalez Terrile', 'Jorge Alfonso Urrutia Carillo',
-    'Viviana Grandón', 'Priscilla Gre Guerra', 'Juan Daniel Figueroa'
+    'Viviana Grandón', 'Priscilla Gre Guerra', 'Juan Daniel Figueroa', 'Dayana Dávila'
 }
 
 TACTICAL_BUYERS = {
@@ -102,7 +96,10 @@ TYPO_CORRECTIONS = {
     'michelle esperanza': 'Michelle Palma',
     'leonardo nacarete': 'Leonardo Nacarate',
     'priscilla gre guerra': 'Priscilla Gre Guerra',
-    'dayana davila': 'Dayana Dávila'
+    'dayana davila': 'Dayana Dávila',
+    'laura mendoza': 'Laura Mendoza', 'diego escalona': 'Diego Escalona',
+    'sofia delgado': 'Sofia Delgado', 'lina diaz': 'Lina Diaz',
+    'judith rivas': 'Judith Rivas'
 }
 
 def normalize_name(name: str) -> str:
@@ -129,76 +126,41 @@ def classify_buyer_strict(raw_name: str) -> tuple:
 # 🔧 FUNCIONES DE CARGA Y PROCESAMIENTO
 # ==============================
 
-def parse_fecha(valor) -> pd.Timestamp:
-    if pd.isna(valor) or str(valor).strip() in ['99.99.9999', '2999', '31/12/2999', 'Indefinido', '']:
-        return pd.NaT
-    if isinstance(valor, pd.Timestamp):
-        return valor if valor.year < 2900 else pd.NaT
-    if isinstance(valor, (int, float)):
-        try:
-            ts = pd.Timestamp('1899-12-30') + pd.Timedelta(days=int(valor))
-            return ts if ts.year < 2900 else pd.NaT
-        except:
-            return pd.NaT
-    valor_str = str(valor).strip()
-    valor_limpio = valor_str.replace('"-"', '-').replace('/', '-').replace('.', '-')
-    formatos = ['%d-%m-%Y', '%d/%m/%Y', '%m/%d/%Y', '%Y-%m-%d', '%d-%m-%y', '%m/%d/%y']
-    for fmt in formatos:
-        try:
-            return pd.to_datetime(valor_limpio, format=fmt, dayfirst=True)
-        except:
-            continue
-    try:
-        ts = pd.to_datetime(valor_limpio, errors='coerce', dayfirst=True)
-        return ts if pd.notna(ts) and ts.year < 2900 else pd.NaT
-    except:
-        return pd.NaT
-
 def cargar_pivot_crudo(file_content: bytes) -> pd.DataFrame:
-    """Parsea el Pivot crudo de Ariba con estructura real."""
-    # Leer todas las hojas
-    try:
-        sheets = pd.read_excel(BytesIO(file_content), sheet_name=None, header=None, engine='openpyxl')
-    except Exception as e:
-        raise ValueError(f"Error al leer el archivo: {str(e)}")
+    """Parsea el Pivot crudo de Ariba saltando metadatos y asignando columnas correctas."""
+    # Leer sin header para inspeccionar
+    df_raw = pd.read_excel(BytesIO(file_content), header=None, engine='openpyxl')
     
-    # Obtener la primera hoja (generalmente es "Data" o "Sheet1")
-    sheet_name = list(sheets.keys())[0]
-    df = sheets[sheet_name]
-    
-    # Buscar la primera fila con un contrato válido (que empiece con CW)
+    # Buscar la primera fila que comienza con "CW" (Contrato válido)
     start_row = None
-    for i in range(len(df)):
-        first_cell = str(df.iloc[i, 0]).strip() if pd.notna(df.iloc[i, 0]) else ''
-        if first_cell.upper().startswith('CW') and len(first_cell) > 2:
+    for i in range(len(df_raw)):
+        val = str(df_raw.iloc[i, 0]).strip() if pd.notna(df_raw.iloc[i, 0]) else ''
+        if val.upper().startswith('CW') and len(val) > 2:
             start_row = i
             break
     
     if start_row is None:
-        # Si no encuentra CW, intentar con cualquier fila que tenga datos
-        for i in range(len(df)):
-            if pd.notna(df.iloc[i, 0]) and str(df.iloc[i, 0]).strip():
-                start_row = i
-                break
+        raise ValueError("No se encontraron contratos válidos (CW...) en el Pivot.")
     
-    if start_row is None:
-        raise ValueError("No se encontraron contratos válidos en el Pivot. Verifica que el archivo contenga datos de Ariba Analysis.")
+    # Cortar el DataFrame desde la fila de datos
+    df_data = df_raw.iloc[start_row:].reset_index(drop=True)
     
-    # Leer desde la fila encontrada
-    df = pd.read_excel(BytesIO(file_content), sheet_name=sheet_name, header=start_row, engine='openpyxl')
+    # Asignar nombres de columna estándar basados en la estructura de Ariba
+    # 0:ID, 1:Name, 2:Begin, 3:Owner, 4:SAP, 5:Evergreen, 6:Region, 7:RUT, 8:Supplier, 9:Desc, 10:Effective, 11:Year, 12:Status, 13:Expiration
+    standard_cols = [
+        'ContractId', 'ProjectName', 'BeginDate', 'Owner', 'SAPCode',
+        'IsEvergreen', 'Region', 'RUT', 'Supplier', 'Description',
+        'EffectiveDate', 'Year', 'Status', 'ExpirationDate'
+    ]
     
-    # Asignar nombres de columnas basados en la estructura del Pivot
-    if len(df.columns) >= 14:
-        df.columns = [
-            'ContractId', 'ProjectName', 'BeginDate', 'Owner', 'SAPCode',
-            'IsEvergreen', 'Region', 'RUT', 'Supplier', 'Description',
-            'EffectiveDate', 'Year', 'Status', 'ExpirationDate'
-        ] + [f'Extra_{i}' for i in range(14, len(df.columns))]
+    # Asignar nombres a las primeras 14 columnas
+    for i, col_name in enumerate(standard_cols):
+        if i < len(df_data.columns):
+            df_data.rename(columns={df_data.columns[i]: col_name}, inplace=True)
     
     # Limpiar filas vacías
-    df = df.dropna(how='all').reset_index(drop=True)
-    
-    return df
+    df_data = df_data.dropna(how='all').reset_index(drop=True)
+    return df_data
 
 def cargar_consolidado_drive(file_content: bytes) -> pd.DataFrame:
     """Carga el Consolidado de Contratos del drive."""
@@ -214,41 +176,27 @@ def procesar_pivot_a_comparar(df_pivot: pd.DataFrame) -> pd.DataFrame:
     """Procesa el Pivot para comparación."""
     df = pd.DataFrame()
     
-    # Mapeo basado en posición/nombre de columnas del Pivot
+    # Mapeo seguro con verificación de existencia
     if 'ContractId' in df_pivot.columns:
         df['contrato_ariba'] = df_pivot['ContractId']
-    elif 'Column_0' in df_pivot.columns:
-        df['contrato_ariba'] = df_pivot['Column_0']
     
     if 'Owner' in df_pivot.columns:
         df['comprador_raw'] = df_pivot['Owner']
-    elif 'Column_3' in df_pivot.columns:
-        df['comprador_raw'] = df_pivot['Column_3']
     
     if 'Status' in df_pivot.columns:
         df['estado_pivot'] = df_pivot['Status']
-    elif 'Column_12' in df_pivot.columns:
-        df['estado_pivot'] = df_pivot['Column_12']
     
     if 'Supplier' in df_pivot.columns:
         df['proveedor'] = df_pivot['Supplier']
-    elif 'Column_8' in df_pivot.columns:
-        df['proveedor'] = df_pivot['Column_8']
     
     if 'Description' in df_pivot.columns:
         df['descripcion'] = df_pivot['Description']
-    elif 'Column_9' in df_pivot.columns:
-        df['descripcion'] = df_pivot['Column_9']
     
     if 'ExpirationDate' in df_pivot.columns:
         df['fecha_termino'] = df_pivot['ExpirationDate']
-    elif 'Column_13' in df_pivot.columns:
-        df['fecha_termino'] = df_pivot['Column_13']
     
     if 'Region' in df_pivot.columns:
         df['region'] = df_pivot['Region']
-    elif 'Column_6' in df_pivot.columns:
-        df['region'] = df_pivot['Column_6']
     
     # Validación estricta de compradores
     if 'comprador_raw' in df.columns:
@@ -261,8 +209,9 @@ def procesar_pivot_a_comparar(df_pivot: pd.DataFrame) -> pd.DataFrame:
         df['comprador_tactico'] = ''
     
     # Filtrar solo contratos válidos
-    df = df[df['contrato_ariba'].notna() & (df['contrato_ariba'].astype(str).str.strip() != '')]
-    df = df[~df['contrato_ariba'].astype(str).str.lower().str.contains('query|field|this worksheet', na=False)]
+    if 'contrato_ariba' in df.columns:
+        df = df[df['contrato_ariba'].notna() & (df['contrato_ariba'].astype(str).str.strip() != '')]
+        df = df[~df['contrato_ariba'].astype(str).str.lower().str.contains('query|field|this worksheet', na=False)]
     
     return df
 
@@ -270,7 +219,7 @@ def procesar_consolidado_a_comparar(df_consol: pd.DataFrame) -> pd.DataFrame:
     """Procesa el Consolidado para comparación."""
     df = pd.DataFrame()
     
-    # Buscar columnas con nombres similares
+    # Búsqueda flexible de columnas
     col_map = {}
     for col in df_consol.columns:
         col_lower = col.lower()
@@ -291,14 +240,11 @@ def procesar_consolidado_a_comparar(df_consol: pd.DataFrame) -> pd.DataFrame:
         elif 'área' in col_lower or 'region' in col_lower:
             col_map['region'] = col
     
-    # Mapear columnas encontradas
     for target_col, source_col in col_map.items():
         df[target_col] = df_consol[source_col]
     
-    # Filtrar contratos válidos
     if 'contrato_ariba' in df.columns:
         df = df[df['contrato_ariba'].notna() & (df['contrato_ariba'].astype(str).str.strip() != '')]
-        df = df[~df['contrato_ariba'].astype(str).str.lower().str.contains('contrato ariba', na=False)]
     
     return df
 
@@ -307,7 +253,10 @@ def comparar_archivos(df_pivot: pd.DataFrame, df_consol: pd.DataFrame) -> pd.Dat
     df_pivot_proc = procesar_pivot_a_comparar(df_pivot)
     df_consol_proc = procesar_consolidado_a_comparar(df_consol)
     
-    # Merge para comparar
+    # Verificar que ambos tengan la columna clave
+    if 'contrato_ariba' not in df_pivot_proc.columns or 'contrato_ariba' not in df_consol_proc.columns:
+        raise ValueError("No se encontró la columna 'contrato_ariba' en uno de los archivos procesados.")
+        
     merged = pd.merge(df_pivot_proc, df_consol_proc, on='contrato_ariba', how='outer', 
                       suffixes=('_pivot', '_consol'), indicator=True)
     
@@ -317,7 +266,6 @@ def comparar_archivos(df_pivot: pd.DataFrame, df_consol: pd.DataFrame) -> pd.Dat
         estado_pivot = str(row.get('estado_pivot', '')).strip()
         estado_consol = str(row.get('estado_consol', '')).strip()
         
-        # Obtener comprador
         comprador_pivot = row.get('comprador_estrategico_pivot', '') or row.get('comprador_tactico_pivot', '')
         comprador_consol = row.get('comprador_estrategico_consol', '') or row.get('comprador_tactico_consol', '')
         
@@ -328,7 +276,6 @@ def comparar_archivos(df_pivot: pd.DataFrame, df_consol: pd.DataFrame) -> pd.Dat
         else:
             continue
         
-        # Verificar si hay diferencia de estados
         if estado_pivot != estado_consol and estado_pivot and estado_consol:
             diferencias.append({
                 'Contrato': contrato,
@@ -349,7 +296,7 @@ def comparar_archivos(df_pivot: pd.DataFrame, df_consol: pd.DataFrame) -> pd.Dat
 
 def crear_kpi_comparacion(df_diff: pd.DataFrame) -> None:
     total = len(df_diff)
-    por_comprador = df_diff.groupby('Comprador').size().to_dict()
+    por_comprador = df_diff.groupby('Comprador').size().to_dict() if not df_diff.empty else {}
     k1, k2, k3 = st.columns(3)
     k1.metric("🔍 Total Incongruencias", f"{total:,}")
     k2.metric("👥 Compradores Afectados", f"{len(por_comprador):,}")
@@ -402,8 +349,6 @@ if not pivot_file or not consol_file:
     - 📊 **Identifica** incongruencias donde los estados no coinciden
     - 👥 **Filtra** por comprador estratégico/táctico
     - 📥 **Exporta** lista de contratos a actualizar
-    
-    > **Importante:** Solo se consideran compradores de la lista maestra oficial.
     """)
     st.stop()
 
@@ -461,9 +406,6 @@ st.markdown(f"**Total:** {len(df_filtrado)} contratos requieren actualización e
 
 if not df_filtrado.empty:
     st.dataframe(df_filtrado, use_container_width=True, height=400)
-    
-    with st.expander("📝 Ver detalles completos"):
-        st.write(df_filtrado.to_html(escape=False), unsafe_allow_html=True)
 
 # ==============================
 # 📥 EXPORTACIÓN
