@@ -76,7 +76,7 @@ STRATEGIC_BUYERS = {
     'Patricio Espinoza', 'Jorge Urrutia', 'Bárbara García', 'Claudio Berrios',
     'Martina Fuentes', 'Joseph España', 'Michelle Palma', 'Juan Figueroa',
     'Magdalena Farias', 'Denisse Andrea Gonzalez Terrile', 'Jorge Alfonso Urrutia Carillo',
-    'Viviana Grandón', 'Priscilla Gre Guerra', 'Juan Daniel Figueroa', 'Dayana Dávila'
+    'Viviana Grandón', 'Priscilla Gre Guerra', 'Juan Daniel Figueroa'
 }
 
 TACTICAL_BUYERS = {
@@ -96,10 +96,7 @@ TYPO_CORRECTIONS = {
     'michelle esperanza': 'Michelle Palma',
     'leonardo nacarete': 'Leonardo Nacarate',
     'priscilla gre guerra': 'Priscilla Gre Guerra',
-    'dayana davila': 'Dayana Dávila',
-    'laura mendoza': 'Laura Mendoza', 'diego escalona': 'Diego Escalona',
-    'sofia delgado': 'Sofia Delgado', 'lina diaz': 'Lina Diaz',
-    'judith rivas': 'Judith Rivas'
+    'dayana davila': 'Dayana Dávila'
 }
 
 def normalize_name(name: str) -> str:
@@ -134,19 +131,28 @@ def cargar_pivot_crudo(file_content: bytes) -> pd.DataFrame:
     # Buscar la primera fila que comienza con "CW" (Contrato válido)
     start_row = None
     for i in range(len(df_raw)):
-        val = str(df_raw.iloc[i, 0]).strip() if pd.notna(df_raw.iloc[i, 0]) else ''
-        if val.upper().startswith('CW') and len(val) > 2:
+        first_cell = str(df_raw.iloc[i, 0]).strip() if pd.notna(df_raw.iloc[i, 0]) else ''
+        # Buscar contratos que empiecen con CW
+        if first_cell.upper().startswith('CW') and len(first_cell) > 2:
             start_row = i
             break
     
     if start_row is None:
-        raise ValueError("No se encontraron contratos válidos (CW...) en el Pivot.")
+        # Si no encuentra CW, intentar con cualquier fila que tenga datos válidos
+        for i in range(len(df_raw)):
+            first_cell = str(df_raw.iloc[i, 0]).strip() if pd.notna(df_raw.iloc[i, 0]) else ''
+            if first_cell and not first_cell.lower().startswith(('this', 'query', 'field', 'raw', 'fixed', 'applied', 'bi-', 'organization', 'owner', 'region', 'employee')):
+                start_row = i
+                break
     
-    # Cortar el DataFrame desde la fila de datos
-    df_data = df_raw.iloc[start_row:].reset_index(drop=True)
+    if start_row is None:
+        raise ValueError("No se encontraron contratos válidos en el Pivot. Verifica que el archivo contenga datos de Ariba Analysis.")
+    
+    # Leer desde la fila encontrada
+    df = pd.read_excel(BytesIO(file_content), header=None, skiprows=range(start_row), engine='openpyxl')
     
     # Asignar nombres de columna estándar basados en la estructura de Ariba
-    # 0:ID, 1:Name, 2:Begin, 3:Owner, 4:SAP, 5:Evergreen, 6:Region, 7:RUT, 8:Supplier, 9:Desc, 10:Effective, 11:Year, 12:Status, 13:Expiration
+    # 0:ContractId, 1:ProjectName, 2:BeginDate, 3:Owner, 4:SAPCode, 5:Evergreen, 6:Region, 7:RUT, 8:Supplier, 9:Desc, 10:Effective, 11:Year, 12:Status, 13:Expiration
     standard_cols = [
         'ContractId', 'ProjectName', 'BeginDate', 'Owner', 'SAPCode',
         'IsEvergreen', 'Region', 'RUT', 'Supplier', 'Description',
@@ -155,12 +161,12 @@ def cargar_pivot_crudo(file_content: bytes) -> pd.DataFrame:
     
     # Asignar nombres a las primeras 14 columnas
     for i, col_name in enumerate(standard_cols):
-        if i < len(df_data.columns):
-            df_data.rename(columns={df_data.columns[i]: col_name}, inplace=True)
+        if i < len(df.columns):
+            df.rename(columns={df.columns[i]: col_name}, inplace=True)
     
     # Limpiar filas vacías
-    df_data = df_data.dropna(how='all').reset_index(drop=True)
-    return df_data
+    df = df.dropna(how='all').reset_index(drop=True)
+    return df
 
 def cargar_consolidado_drive(file_content: bytes) -> pd.DataFrame:
     """Carga el Consolidado de Contratos del drive."""
@@ -266,6 +272,7 @@ def comparar_archivos(df_pivot: pd.DataFrame, df_consol: pd.DataFrame) -> pd.Dat
         estado_pivot = str(row.get('estado_pivot', '')).strip()
         estado_consol = str(row.get('estado_consol', '')).strip()
         
+        # Obtener comprador
         comprador_pivot = row.get('comprador_estrategico_pivot', '') or row.get('comprador_tactico_pivot', '')
         comprador_consol = row.get('comprador_estrategico_consol', '') or row.get('comprador_tactico_consol', '')
         
@@ -349,6 +356,8 @@ if not pivot_file or not consol_file:
     - 📊 **Identifica** incongruencias donde los estados no coinciden
     - 👥 **Filtra** por comprador estratégico/táctico
     - 📥 **Exporta** lista de contratos a actualizar
+    
+    > **Importante:** Solo se consideran compradores de la lista maestra oficial.
     """)
     st.stop()
 
