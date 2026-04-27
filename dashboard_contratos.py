@@ -19,7 +19,6 @@ st.markdown("""
     .diff-mismatch { color: #e74c3c; font-weight: bold; background: #fff3cd; padding: 2px 6px; border-radius: 4px; }
     .metric-card { background: linear-gradient(135deg, #1e3a5f, #2d5986); border-radius: 10px; padding: 15px; color: white; text-align: center; }
     div[data-testid="stMetricValue"] { font-size: 1.8rem; }
-    .stDataFrame { border: 1px solid #e0e0e0; border-radius: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -78,62 +77,74 @@ def normalize_status(val):
     return s
 
 # ==============================
-# 🔧 CARGA Y MAPEO ROBUSTO
+# 🔧 CARGA ROBUSTA DE PIVOT
 # ==============================
 def cargar_pivot_crudo(file_content):
-    """Carga el Pivot crudo de Ariba buscando la hoja y fila de datos correcta."""
+    """Carga el Pivot crudo de Ariba buscando datos reales y mapeando por posición."""
     xls = pd.ExcelFile(file_content)
     
-    # 1. Identificar la hoja de datos
+    # Priorizar hoja 'Data' o 'Sheet1', o la que tenga más filas
     sheet_names = xls.sheet_names
-    data_sheet = None
+    target_sheet = None
     
     if 'Data' in sheet_names:
-        data_sheet = 'Data'
-    elif len(sheet_names) > 0:
-        # Si no hay 'Data', tomar la hoja con más filas/columnas (asumiendo que es la de datos)
-        max_cells = 0
+        target_sheet = 'Data'
+    else:
+        # Buscar la hoja con más contenido
+        max_rows = 0
         for s in sheet_names:
-            df_temp = pd.read_excel(xls, sheet_name=s, nrows=10)
-            if df_temp.size > max_cells:
-                max_cells = df_temp.size
-                data_sheet = s
+            df_temp = pd.read_excel(xls, sheet_name=s, header=None)
+            if len(df_temp) > max_rows:
+                max_rows = len(df_temp)
+                target_sheet = s
     
-    if data_sheet is None:
-        raise ValueError("No se encontró ninguna hoja con datos en el archivo Pivot.")
+    if target_sheet is None:
+        raise ValueError("No se encontraron hojas de cálculo en el archivo.")
 
-    # 2. Leer sin header para encontrar la fila de inicio
-    df_raw = pd.read_excel(xls, sheet_name=data_sheet, header=None)
+    # Leer toda la hoja sin header para inspeccionar
+    df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
     
+    # Buscar la fila donde empieza el primer contrato (CW...)
     start_row = None
-    # Buscar la primera fila donde la primera celda empieza con 'CW'
     for i in range(len(df_raw)):
-        val = str(df_raw.iloc[i, 0]).strip().upper() if pd.notna(df_raw.iloc[i, 0]) else ''
-        if val.startswith('CW') and len(val) > 2:
-            start_row = i
+        # Verificar varias columnas iniciales por si el formato varía ligeramente
+        for col_idx in [0, 1]: 
+            if col_idx < len(df_raw.columns):
+                val = str(df_raw.iloc[i, col_idx]).strip().upper()
+                if val.startswith('CW') and len(val) > 5: # CW seguido de números
+                    start_row = i
+                    break
+        if start_row is not None:
             break
-    
+            
     if start_row is None:
-        raise ValueError(f"No se encontraron contratos válidos (CW...) en la hoja '{data_sheet}'.")
+        raise ValueError(f"No se encontraron contratos válidos (CW...) en la hoja '{target_sheet}'. Verifica que sea un export de Ariba Analysis.")
     
-    # 3. Leer datos desde la fila encontrada
-    # Asumimos que la fila anterior (start_row - 1) podría ser el header, pero para ser seguros
-    # leemos desde start_row sin header y asignamos nombres manualmente.
-    df_data = pd.read_excel(xls, sheet_name=data_sheet, header=None, skiprows=range(start_row))
+    # Extraer datos desde la fila encontrada
+    df_data = df_raw.iloc[start_row:].reset_index(drop=True)
     
-    # Asignar nombres de columnas basados en la posición conocida del export de Ariba
-    # 0: Contrato, 3: Owner, 10: Fecha Inicio, 12: Estado, 13: Fecha Fin
-    df_data.columns = [
-        'contrato', 'desc_1', 'desc_2', 'comprador', 'desc_4', 'desc_5', 'desc_6', 
-        'desc_7', 'desc_8', 'desc_9', 'fecha_inicio', 'desc_11', 'estado', 'fecha_fin'
-    ] + [f'extra_{i}' for i in range(14, len(df_data.columns))]
+    # Mapeo por POSICIÓN (basado en estructura estándar de Ariba Analysis)
+    # 0: ContractId, 3: Owner (Comprador), 10: EffectiveDate (Inicio), 12: Status (Estado), 13: ExpirationDate (Fin)
+    col_map = {
+        'contrato': 0,
+        'comprador': 3,
+        'fecha_inicio': 10,
+        'estado': 12,
+        'fecha_fin': 13
+    }
     
-    # Seleccionar solo columnas de interés
-    df_out = df_data[['contrato', 'comprador', 'fecha_inicio', 'estado', 'fecha_fin']].copy()
-    
-    # Limpieza y filtrado
+    df_out = pd.DataFrame()
+    for col_name, col_idx in col_map.items():
+        if col_idx < len(df_data.columns):
+            df_out[col_name] = df_data.iloc[:, col_idx]
+        else:
+            df_out[col_name] = None # Columna no encontrada
+            
+    # Limpieza
     df_out['contrato'] = df_out['contrato'].astype(str).str.strip().str.upper()
-    df_out = df_out[df_out['contrato'].str.startswith('CW') & df_out['contrato'].str.len() > 2]
+    df_out = df_out[df_out['contrato'].str.startswith('CW') & (df_out['contrato'].str.len() > 5)]
+    
+    # Filtrar compradores válidos
     df_out = df_out[df_out['comprador'].apply(is_valid_buyer)]
     df_out = df_out.drop_duplicates(subset=['contrato'])
     
@@ -182,7 +193,7 @@ def cargar_consolidado(file_content):
     df_out['estado'] = df[col_map.get('estado', '')] if 'estado' in col_map else ''
     
     # Filtrar
-    df_out = df_out[df_out['contrato'].str.startswith('CW') & df_out['contrato'].str.len() > 2]
+    df_out = df_out[df_out['contrato'].str.startswith('CW') & (df_out['contrato'].str.len() > 5)]
     df_out = df_out[df_out['comprador'].apply(is_valid_buyer)]
     df_out = df_out.drop_duplicates(subset=['contrato'])
     
@@ -198,7 +209,7 @@ def comparar_archivos(df_pivot, df_consol):
     resultados = []
     for contrato, row in merged.iterrows():
         comp_pivot = str(row.get('comprador_pivot', '') or row.get('comprador_consol', '')).strip()
-        # Si no hay comprador válido en ninguno de los dos, saltar (aunque el filtro inicial debería haberlo evitado)
+        # Si no hay comprador válido en ninguno de los dos, saltar
         if not comp_pivot and not is_valid_buyer(str(row.get('comprador_pivot', '')) + str(row.get('comprador_consol', ''))):
             continue
             
