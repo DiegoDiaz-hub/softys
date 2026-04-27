@@ -1,774 +1,1041 @@
+"""
+dashboard_pivot.py
+==================
+Dashboard de Gestión de Contratos — Softys Chile
+Fuente de datos: Pivot crudo descargado desde SAP Ariba Analysis
+Ejecutar: streamlit run dashboard_pivot.py
+"""
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import re
-import hashlib
+from datetime import datetime
 from io import BytesIO
-from typing import Dict, List, Optional, Tuple
+import hashlib
 import warnings
-warnings.filterwarnings('ignore')
+warnings.filterwarnings("ignore")
 
-# ==============================
-# 🧠 CONFIGURACIÓN INICIAL
-# ==============================
+# ─────────────────────────────────────────────────────────────
+# CONFIGURACIÓN
+# ─────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Gestión de Contratos — Softys",
+    page_title="Contratos · Softys",
     page_icon="📋",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# ==============================
-# 🎨 ESTILOS PERSONALIZADOS
-# ==============================
 st.markdown("""
 <style>
-    .metric-card {
-        background: linear-gradient(135deg, #1e3a5f, #2d5986);
-        border-radius: 12px;
-        padding: 16px 20px;
-        color: white;
-        text-align: center;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-    }
-    .metric-value { font-size: 2rem; font-weight: 700; margin: 4px 0; }
-    .metric-label { font-size: 0.8rem; opacity: 0.85; text-transform: uppercase; letter-spacing: 1px; }
-    .alert-box {
-        border-left: 5px solid #e74c3c;
-        background: #fdf2f2;
-        padding: 12px 16px;
-        border-radius: 0 8px 8px 0;
-        margin-bottom: 8px;
-        font-size: 0.9rem;
-    }
-    .warn-box {
-        border-left: 5px solid #f39c12;
-        background: #fef9ed;
-        padding: 12px 16px;
-        border-radius: 0 8px 8px 0;
-        margin-bottom: 8px;
-        font-size: 0.9rem;
-    }
-    .success-box {
-        border-left: 5px solid #27ae60;
-        background: #f0fdf4;
-        padding: 12px 16px;
-        border-radius: 0 8px 8px 0;
-        margin-bottom: 8px;
-        font-size: 0.9rem;
-    }
-    div[data-testid="stMetricValue"] { font-size: 1.8rem; }
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
+
+  html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
+
+  /* Sidebar */
+  section[data-testid="stSidebar"] {
+    background: #0d1f3c;
+    color: #e8eef7;
+  }
+  section[data-testid="stSidebar"] * { color: #e8eef7 !important; }
+  section[data-testid="stSidebar"] .stSelectbox > div > div,
+  section[data-testid="stSidebar"] .stMultiSelect > div > div {
+    background: #1a3358 !important;
+    border-color: #2e5490 !important;
+    color: #e8eef7 !important;
+  }
+  section[data-testid="stSidebar"] hr { border-color: #2e5490; }
+
+  /* KPI Cards */
+  .kpi-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 24px; }
+  .kpi-card {
+    background: #ffffff;
+    border-radius: 12px;
+    padding: 18px 16px 14px;
+    border-left: 4px solid #1a56db;
+    box-shadow: 0 1px 8px rgba(0,0,0,0.07);
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .kpi-card.green  { border-left-color: #059669; }
+  .kpi-card.yellow { border-left-color: #d97706; }
+  .kpi-card.red    { border-left-color: #dc2626; }
+  .kpi-card.gray   { border-left-color: #6b7280; }
+  .kpi-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: .08em; color: #6b7280; font-weight: 600; }
+  .kpi-value { font-size: 2rem; font-weight: 700; color: #0d1f3c; line-height: 1; }
+  .kpi-sub   { font-size: 0.72rem; color: #9ca3af; margin-top: 2px; }
+
+  /* Alert rows */
+  .alert-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px; border-radius: 8px;
+    background: #fff7ed; border-left: 4px solid #f59e0b;
+    margin-bottom: 6px; font-size: 0.85rem;
+  }
+  .alert-row.red-alert { background: #fef2f2; border-left-color: #ef4444; }
+  .alert-tag {
+    font-size: 0.7rem; font-weight: 700; padding: 2px 8px;
+    border-radius: 99px; background: #fde68a; color: #92400e;
+    white-space: nowrap;
+  }
+  .alert-tag.red-tag { background: #fecaca; color: #991b1b; }
+
+  /* Section headers */
+  .section-title {
+    font-size: 1rem; font-weight: 700; color: #0d1f3c;
+    border-bottom: 2px solid #e5e7eb; padding-bottom: 6px;
+    margin: 24px 0 14px;
+  }
+
+  /* Hide Streamlit default decoration */
+  #MainMenu, footer, header { visibility: hidden; }
+  .block-container { padding-top: 1.5rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# ==============================
-# 🛡️ CONSTANTES
-# ==============================
-MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024
-DIAS_ALERTA_VENCIMIENTO = 30
-
-# ==============================
-# ✅ LISTA MAESTRA DE COMPRADORES (ESTRICTA)
-# ==============================
-STRATEGIC_BUYERS = {
-    'Patricio Espinoza', 'Jorge Urrutia', 'Bárbara García', 'Claudio Berrios',
-    'Martina Fuentes', 'Joseph España', 'Michelle Palma', 'Juan Figueroa',
-    'Magdalena Farias', 'Denisse Andrea Gonzalez Terrile'
+# ─────────────────────────────────────────────────────────────
+# CONSTANTES — MAPEO PIVOT
+# ─────────────────────────────────────────────────────────────
+# Columnas exactas del Pivot Ariba (hoja Data, fila header 14)
+PIVOT_COL_MAP = {
+    "ID de contrato":                                    "contrato_ariba",
+    "Proyecto - Nombre del proyecto":                    "nombre_proyecto",
+    "Fecha de inicio":                                   "fecha_inicio_raw",
+    "Nombre del propietario":                            "comprador_raw",
+    "Código acreedor SAP":                               "cod_sap",
+    "Es Indefinido":                                     "es_indefinido_raw",
+    "Región - Región (L2)":                              "region",
+    "Rut empresa proveedor":                             "rut",
+    "Partes afectadas - Proveedor común":                "proveedor",
+    "Contrato - Contrato":                               "contrato_nombre",
+    "Fecha de entrada en vigor - Fecha":                 "fecha_vigor_raw",
+    "Fecha de finalización - Año":                       "anio_fin",
+    "Estado del contrato":                               "estado_contrato",
+    "Fecha de expiración - Fecha":                       "fecha_termino_raw",
+    "Es un proyecto de prueba":                          "es_prueba",
+    "Descripción":                                       "descripcion",
+    "Aplica Garantía":                                   "aplica_garantia",
+    "Fecha de presentación Garantía N°1 - Fecha":        "fecha_presentacion_garantia",
+    "N° de Tipos de Garantías":                          "n_tipos_garantia",
+    "Fecha de termino de notificaciones de garantía - Año": "anio_termino_garantia",
+    "sum(Importe del contrato)":                         "monto_base",
+    "sum(Importe Monto Total Contrato Original)":        "monto_original",
+    "sum(Importe Monto total Contrato)":                 "monto_total",
 }
-TACTICAL_BUYERS = {
-    'Leonardo Nacarate', 'Martina Fuentes', 'Scarlette Lucero',
-    'Margarita Lineros', 'Erika Silva', 'Karina Satelo', 'Pablo Labs'
+
+# Compradores estratégicos conocidos (lista maestra)
+COMPRADORES_ESTRATEGICOS = {
+    "Jorge Alfonso Urrutia Carillo": "Jorge Urrutia",
+    "Juan Daniel Figueroa": "Juan Figueroa",
+    "Joseph Eduardo España Escalona": "Joseph España",
+    "Dayana Dávila": "Dayana Dávila",
+    "Magdalena Farias": "Magdalena Farias",
+    "Denisse Andrea Gonzalez Terrile": "Denisse González",
+    "Laura Mendoza": "Laura Mendoza",
+    "Bárbara García": "Bárbara García",
+    "Claudio Berrios": "Claudio Berrios",
+    "Michelle Esperanza": "Michelle Palma",
+    "Lina Diaz": "Lina Díaz",
+    "Victor Camilla": "Victor Camilla",
+    "Leandro Medina": "Leandro Medina",
+    "Diego Escalona": "Diego Escalona",
+    "Judith Rivas": "Judith Rivas",
+    "Sofia Delgado": "Sofia Delgado",
+    "Daniela Escobar": "Daniela Escobar",
+    "Valeria Silva": "Valeria Silva",
+    "Priscilla Gre Guerra": "Priscilla Guerra",
+    "MARTINA FUENTES": "Martina Fuentes",
 }
-TYPO_CORRECTIONS = {
-    'jorge uturria': 'Jorge Urrutia', 'jorgue urrutia': 'Jorge Urrutia',
-    'dennis andrea gonzales': 'Denisse Andrea Gonzalez Terrile',
-    'denisse andrea gonzalez terrile': 'Denisse Andrea Gonzalez Terrile',
-    'juan daniel figueroa': 'Juan Figueroa',
-    'joseph eduardo españa escalona': 'Joseph España',
-    'michelle esperanza': 'Michelle Palma',
-    'leonardo nacarete': 'Leonardo Nacarate'
+
+COLORES_RIESGO = {
+    "BAJO 🟢":    "#059669",
+    "MEDIO 🟡":   "#d97706",
+    "ALTO 🔴":    "#dc2626",
+    "REVISAR ⚪": "#6b7280",
 }
 
-def normalize_name(name: str) -> str:
-    if pd.isna(name) or str(name).strip() == '': return ''
-    clean = str(name).strip().lower()
-    clean = ''.join(c for c in clean if c not in 'áéíóúüñ')
-    return clean
+MAX_FILE_MB = 50
 
-def classify_buyer_strict(raw_name: str) -> tuple:
-    clean_raw = normalize_name(raw_name)
-    if not clean_raw: return None, None
-    for typo, correct in TYPO_CORRECTIONS.items():
-        if typo in clean_raw or clean_raw in typo:
-            clean_raw = normalize_name(correct); break
-    for official in STRATEGIC_BUYERS:
-        if clean_raw == normalize_name(official) or clean_raw in normalize_name(official) or normalize_name(official) in clean_raw:
-            return 'strategic', official
-    for official in TACTICAL_BUYERS:
-        if clean_raw == normalize_name(official) or clean_raw in normalize_name(official) or normalize_name(official) in clean_raw:
-            return 'tactical', official
-    return None, None
+# ─────────────────────────────────────────────────────────────
+# FUNCIONES UTILITARIAS
+# ─────────────────────────────────────────────────────────────
 
-# ==============================
-# 🔧 FUNCIONES BACKEND
-# ==============================
-
-def parse_fecha(valor) -> pd.Timestamp:
-    if pd.isna(valor) or str(valor).strip() in ['99.99.9999', '2999', '31/12/2999', 'Indefinido', '']:
-        return pd.NaT
-    if isinstance(valor, pd.Timestamp):
-        return valor if valor.year < 2900 else pd.NaT
-    if isinstance(valor, (int, float)):
+def parse_fecha(val) -> pd.Timestamp:
+    if pd.isna(val): return pd.NaT
+    s = str(val).strip()
+    if s in ("", "99.99.9999", "31/12/2999", "2999", "nan"): return pd.NaT
+    if isinstance(val, pd.Timestamp):
+        return val if val.year < 2900 else pd.NaT
+    if isinstance(val, (int, float)):
         try:
-            ts = pd.Timestamp('1899-12-30') + pd.Timedelta(days=int(valor))
+            ts = pd.Timestamp("1899-12-30") + pd.Timedelta(days=int(val))
             return ts if ts.year < 2900 else pd.NaT
-        except:
+        except Exception:
             return pd.NaT
-    valor_str = str(valor).strip()
-    valor_limpio = valor_str.replace('"-"', '-').replace('/', '-').replace('.', '-')
-    formatos = ['%d-%m-%Y', '%d/%m/%Y', '%m/%d/%Y', '%Y-%m-%d', '%d-%m-%y', '%m/%d/%y']
-    for fmt in formatos:
+    # Intentar múltiples formatos
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%m/%d/%Y", "%d.%m.%Y"):
         try:
-            return pd.to_datetime(valor_limpio, format=fmt, dayfirst=True)
-        except:
+            ts = pd.to_datetime(s, format=fmt)
+            return ts if ts.year < 2900 else pd.NaT
+        except Exception:
             continue
     try:
-        ts = pd.to_datetime(valor_limpio, errors='coerce', dayfirst=True)
+        ts = pd.to_datetime(s, dayfirst=True, errors="coerce")
         return ts if pd.notna(ts) and ts.year < 2900 else pd.NaT
-    except:
+    except Exception:
         return pd.NaT
 
-def limpiar_monto(valor) -> float:
-    if pd.isna(valor): return 0.0
-    try:
-        limpio = str(valor).replace('.', '').replace(',', '.').replace('$', '').replace('UF', '').strip()
-        return float(limpio) if limpio else 0.0
-    except:
-        return 0.0
 
-def cargar_pivot_crudo(file_content: bytes) -> pd.DataFrame:
-    """Parsea el Pivot crudo de Ariba con estructura real."""
-    df_scan = pd.read_excel(BytesIO(file_content), header=None, nrows=50, engine='openpyxl')
-    
-    # Buscar fila donde aparezca 'ContractId' o 'Raw_Field_Names'
-    header_row = None
-    for i in range(len(df_scan)):
-        row_str = ' '.join(str(v).lower() for v in df_scan.iloc[i] if pd.notna(df_scan.iloc[i]))
-        if 'contractid' in row_str or 'raw_field_names' in row_str:
-            header_row = i
-            break
-    
-    if header_row is None:
-        # Fallback: intentar leer con header en fila 2
-        try:
-            df = pd.read_excel(BytesIO(file_content), header=2, engine='openpyxl')
-            df.columns = [str(c).strip() for c in df.columns]
-            return df.dropna(how='all').reset_index(drop=True)
-        except:
-            raise ValueError("No se pudo detectar la fila de encabezados.")
-    
-    # Si encontramos Raw_Field_Names, parsear los headers concatenados
-    raw_headers = None
-    for col in range(df_scan.shape[1]):
-        val = df_scan.iloc[header_row, col]
-        if pd.notna(val) and 'ContractId' in str(val):
-            raw_headers = str(val)
-            break
-    
-    if raw_headers and ',' in raw_headers:
-        # Headers concatenados por coma
-        column_names = [c.strip() for c in raw_headers.split(',') if c.strip()]
-        df_data = pd.read_excel(BytesIO(file_content), header=None, skiprows=range(header_row + 1), engine='openpyxl')
-        if len(column_names) <= df_data.shape[1]:
-            df_data.columns = column_names + [f'Extra_{i}' for i in range(len(column_names), df_data.shape[1])]
-        else:
-            df_data.columns = column_names[:df_data.shape[1]]
-        df = df_data.dropna(how='all').reset_index(drop=True)
-    else:
-        # Headers en filas normales
-        df = pd.read_excel(BytesIO(file_content), header=header_row, engine='openpyxl')
-        df.columns = [str(c).strip() for c in df.columns]
-        df = df.dropna(how='all').reset_index(drop=True)
-    
-    return df
+def normalizar_nombre(nombre: str) -> str:
+    return str(nombre).strip().lower()
 
-def transformar_pivot_a_consolidado(df_pivot: pd.DataFrame) -> pd.DataFrame:
-    """Transforma el Pivot crudo al formato esperado por el dashboard."""
-    # Mapeo robusto con fallbacks
-    ARIBA_MAP = {
-        'ContractId': 'contrato_ariba',
-        'ProjectInfo.ProjectName': 'descripcion',
-        'Owner.UserName': 'comprador_estrategico_raw',
-        'Owner': 'comprador_estrategico_raw',
-        'ContractStatus': 'estado_contrato',
-        'Status': 'estado_contrato',
-        'UF_string11': 'rut',
-        'Rut': 'rut',
-        'UF_string10': 'cod_sap',
-        'Código': 'cod_sap',
-        'AffectedParties.CommonSupplierName': 'proveedor',
-        'Supplier': 'proveedor',
-        'EffectiveDate.Day': 'fecha_inicio',
-        'BeginDate.Day': 'fecha_inicio',
-        'ExpirationDate.Day': 'fecha_termino',
-        'EndDate.Year': 'anio_fin',
-        'Description': 'descripcion_alt',
-        'Region.RegionNameL2': 'region',
-        'Region': 'region',
-        'IsEvergreen': 'es_indefinido_raw',
-        'Indefinido': 'es_indefinido_raw',
-        'UF_boolean1': 'aplica_garantia',
-        'Garantía': 'aplica_garantia',
-        'sum(Amount)': 'monto_contrato',
-        'Monto': 'monto_contrato',
-    }
-    
-    df = pd.DataFrame()
-    for ariba_col, target_col in ARIBA_MAP.items():
-        if ariba_col in df_pivot.columns and target_col not in df.columns:
-            df[target_col] = df_pivot[ariba_col].copy()
-    
-    # Crear columnas faltantes con valores por defecto
-    for col in ['contrato_ariba', 'descripcion', 'comprador_estrategico_raw', 'estado_contrato', 
-                'rut', 'cod_sap', 'proveedor', 'fecha_inicio', 'fecha_termino', 'region', 
-                'es_indefinido_raw', 'aplica_garantia', 'monto_contrato']:
-        if col not in df.columns:
-            df[col] = ''
-    
-    # Validación estricta de compradores
-    raw_owners = df['comprador_estrategico_raw'].fillna('').astype(str)
-    classified = raw_owners.apply(classify_buyer_strict)
-    df['comprador_estrategico'] = [x[1] if x[0] == 'strategic' else '' for x in classified]
-    df['comprador_tactico'] = [x[1] if x[0] == 'tactical' else '' for x in classified]
-    
-    # 🗑️ Eliminar filas sin compradores válidos (usando máscara booleana correcta)
-    mask_valid_buyer = (df['comprador_estrategico'] != '') | (df['comprador_tactico'] != '')
-    df = df[mask_valid_buyer].reset_index(drop=True)
-    
-    # 🚫 Eliminar contratos Cerrados (verificar columna existe primero)
-    if 'estado_contrato' in df.columns and not df['estado_contrato'].empty:
-        mask_no_cerrado = ~df['estado_contrato'].astype(str).str.strip().str.lower().isin(['cerrado', 'cerrados'])
-        df = df[mask_no_cerrado].reset_index(drop=True)
-    
-    # 🛡️ Copiar Estratégico a Táctico si está vacío (usando máscara booleana)
-    if 'comprador_tactico' in df.columns and 'comprador_estrategico' in df.columns:
-        mask_tactical_empty = (df['comprador_tactico'] == '') & (df['comprador_estrategico'] != '')
-        df.loc[mask_tactical_empty, 'comprador_tactico'] = df.loc[mask_tactical_empty, 'comprador_estrategico']
-    
-    # Formatear fechas (con manejo seguro de columnas)
-    for date_col in ['fecha_inicio', 'fecha_termino']:
-        if date_col in df.columns and not df[date_col].empty:
-            df[date_col] = df[date_col].apply(parse_fecha)
-        elif date_col not in df.columns:
-            df[date_col] = pd.NaT
-    
-    # Días para vencimiento (solo si la columna existe y tiene datos)
-    hoy = pd.Timestamp.today().normalize()
-    if 'fecha_termino' in df.columns and not df['fecha_termino'].empty:
-        df['dias_para_vencimiento'] = (df['fecha_termino'] - hoy).dt.days
-    else:
-        df['dias_para_vencimiento'] = np.nan
-    
-    # Es indefinido
-    def es_indef(row):
-        raw = str(row.get('es_indefinido_raw', '')).strip().lower()
-        if raw in ['sí', 'si', 'yes', '1', 'true', 'indefinido']:
-            return True
-        fecha_term = row.get('fecha_termino')
-        if pd.notna(fecha_term) and hasattr(fecha_term, 'year') and fecha_term.year > 2100:
-            return True
-        return False
-    df['es_indefinido'] = df.apply(es_indef, axis=1)
-    
-    # Riesgo spot
-    def clasificar_riesgo(estado: str, dias_restantes, es_indefinido: bool = False) -> str:
-        estados_bajos = ['Publicado', 'En revisión', 'Aprobado']
-        estados_medios = ['Próximo a vencer', 'Por vencer', 'En modificación', 'Modificación del borrador']
-        estados_altos = ['Vencido', 'Cancelado', 'Terminado']
-        estados_revisar = ['Borrador', 'En espera']
-        if es_indefinido: return 'BAJO 🟢'
-        if pd.isna(dias_restantes): return 'REVISAR ⚪'
-        try:
-            dias = int(dias_restantes)
-        except:
-            return 'REVISAR ⚪'
-        if estado in estados_altos or dias < 0: return 'ALTO 🔴'
-        if estado in estados_medios or dias <= 30: return 'MEDIO 🟡'
-        if estado in estados_revisar: return 'REVISAR ⚪'
-        if estado in estados_bajos or dias > 30: return 'BAJO 🟢'
-        return 'REVISAR ⚪'
-    
-    df['riesgo_spot'] = df.apply(
-        lambda r: clasificar_riesgo(str(r.get('estado_contrato', '')), r.get('dias_para_vencimiento'), r.get('es_indefinido', False)),
-        axis=1
-    )
-    
-    # Monto
-    if 'monto_contrato' in df.columns:
-        df['monto_contrato_num'] = pd.to_numeric(df['monto_contrato'], errors='coerce').fillna(0)
-    else:
-        df['monto_contrato_num'] = 0
-    
-    # Limpiar comprador (quitar filas sin contrato) - usando máscara booleana correcta
-    if 'contrato_ariba' in df.columns:
-        mask_valid_contrato = df['contrato_ariba'].notna() & (df['contrato_ariba'].astype(str).str.strip() != '')
-        df = df[mask_valid_contrato].reset_index(drop=True)
-    
-    return df
 
-def clasificar_riesgo_contrato(estado: str, dias_restantes, es_indefinido: bool = False) -> str:
-    estados_bajos = ['Publicado', 'En revisión', 'Aprobado']
-    estados_medios = ['Próximo a vencer', 'Por vencer', 'En modificación', 'Modificación del borrador']
-    estados_altos = ['Vencido', 'Cancelado', 'Terminado']
-    estados_revisar = ['Borrador', 'En espera']
-    if es_indefinido: return 'BAJO 🟢'
-    if pd.isna(dias_restantes): return 'REVISAR ⚪'
-    dias = int(dias_restantes)
-    if estado in estados_altos or dias < 0: return 'ALTO 🔴'
-    if estado in estados_medios or dias <= 30: return 'MEDIO 🟡'
-    if estado in estados_revisar: return 'REVISAR ⚪'
-    if estado in estados_bajos or dias > 30: return 'BAJO 🟢'
-    return 'REVISAR ⚪'
+def normalizar_comprador(raw: str) -> str:
+    """Devuelve nombre canónico del comprador o el nombre limpio si no está en la lista."""
+    raw_norm = normalizar_nombre(raw)
+    for clave, canonico in COMPRADORES_ESTRATEGICOS.items():
+        if normalizar_nombre(clave) == raw_norm:
+            return canonico
+    # Capitalizar y devolver si no está en lista
+    return str(raw).strip().title() if raw and str(raw).strip() else "Sin asignar"
+
+
+def calcular_riesgo(estado: str, dias: float | None, es_indefinido: bool) -> str:
+    if es_indefinido:
+        return "BAJO 🟢"
+    if dias is None or pd.isna(dias):
+        return "REVISAR ⚪"
+    d = int(dias)
+    estado_l = str(estado).strip()
+    if estado_l in ("Vencido", "Cancelado", "Terminado") or d < 0:
+        return "ALTO 🔴"
+    if estado_l in ("Modificación del borrador", "Próximo a vencer") or d <= 60:
+        return "MEDIO 🟡"
+    if estado_l in ("Borrador", "En espera"):
+        return "REVISAR ⚪"
+    if estado_l in ("Publicado", "En revisión", "Aprobado") or d > 60:
+        return "BAJO 🟢"
+    return "REVISAR ⚪"
+
+
+def fmt_millones(v: float) -> str:
+    if v >= 1_000_000_000:
+        return f"${v/1_000_000_000:.1f}B"
+    if v >= 1_000_000:
+        return f"${v/1_000_000:.1f}M"
+    if v >= 1_000:
+        return f"${v/1_000:.0f}K"
+    return f"${v:.0f}"
+
+
+# ─────────────────────────────────────────────────────────────
+# CARGA Y TRANSFORMACIÓN DEL PIVOT
+# ─────────────────────────────────────────────────────────────
+
+def detectar_fila_header(content: bytes) -> int:
+    """Detecta la fila 0-indexed donde está 'ID de contrato' en hoja Data."""
+    df_scan = pd.read_excel(BytesIO(content), sheet_name="Data", header=None, nrows=25, engine="openpyxl")
+    for i, row in df_scan.iterrows():
+        if "ID de contrato" in row.values:
+            return i
+    raise ValueError("No se encontró 'ID de contrato' en las primeras 25 filas de la hoja Data.")
+
 
 @st.cache_data(show_spinner=False)
-def cargar_y_procesar_contratos(file_hash: str, file_content: bytes, usar_pivot_crudo: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
-    if usar_pivot_crudo:
-        df_pivot = cargar_pivot_crudo(file_content)
-        df = transformar_pivot_a_consolidado(df_pivot)
-        df_bg = pd.DataFrame()
-        reporte = {
-            'fuente_principal': 'Pivot Ariba (crudo)',
-            'contratos_totales': len(df),
-            'sin_fecha_termino': int(df['fecha_termino'].isna().sum()) if 'fecha_termino' in df.columns else 0,
-            'sin_proveedor': int(df['proveedor'].isna().sum()) if 'proveedor' in df.columns else 0,
-            'sin_area': 'N/A (requiere consolidado)',
-            'compradores_unicos': df['comprador_estrategico'].nunique() if 'comprador_estrategico' in df.columns else 0,
-        }
-        return df, df_bg, reporte
+def cargar_pivot(file_hash: str, content: bytes) -> pd.DataFrame:
+    header_idx = detectar_fila_header(content)
+    df_raw = pd.read_excel(BytesIO(content), sheet_name="Data", header=header_idx, engine="openpyxl")
+    df_raw = df_raw.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+
+    # Renombrar columnas conocidas
+    df = df_raw.rename(columns={k: v for k, v in PIVOT_COL_MAP.items() if k in df_raw.columns})
+
+    # ── Eliminar contratos cerrados
+    if "estado_contrato" in df.columns:
+        df = df[~df["estado_contrato"].astype(str).str.lower().str.strip().isin(["cerrado", "cerrados"])]
+
+    # ── Fechas
+    for col_raw, col_parsed in [("fecha_inicio_raw", "fecha_inicio"), ("fecha_termino_raw", "fecha_termino"), ("fecha_vigor_raw", "fecha_vigor")]:
+        if col_raw in df.columns:
+            df[col_parsed] = df[col_raw].apply(parse_fecha)
+
+    # ── Comprador normalizado
+    if "comprador_raw" in df.columns:
+        df["comprador"] = df["comprador_raw"].apply(normalizar_comprador)
     else:
-        # Modo legacy
-        sheets = pd.read_excel(BytesIO(file_content), sheet_name=None, engine='openpyxl')
-        if 'Info Ariba' not in sheets:
-            raise ValueError("No se encontró la hoja 'Info Ariba' en el archivo.")
-        df_ariba = sheets['Info Ariba'].dropna(how='all').dropna(axis=1, how='all').copy()
-        df_ariba = df_ariba.rename(columns={
-            'ID de contrato': 'contrato_ariba', 'Proyecto - Nombre del proyecto': 'descripcion',
-            'Nombre del propietario': 'comprador_estrategico', 'Partes afectadas - Proveedor común': 'proveedor',
-            'Rut empresa proveedor': 'rut', 'Código acreedor SAP': 'cod_sap',
-            'Es Indefinido': 'es_indefinido_raw', 'Región - Región (L2)': 'region',
-            'Fecha de entrada en vigor - Fecha': 'fecha_inicio', 'Fecha de expiración - Fecha': 'fecha_termino',
-            'Estado del contrato': 'estado_contrato', 'Aplica Garantía': 'aplica_garantia',
-            'sum(Importe Monto total Contrato)': 'monto_contrato',
-        })
-        df_ariba.columns = df_ariba.columns.astype(str)
-        hoja_consol = next((h for h in ['Consolidado de Contratos', 'Antiguo'] if h in sheets), None)
-        if hoja_consol:
-            df_consol = sheets[hoja_consol].dropna(how='all').dropna(axis=1, how='all').copy()
-            df_consol.columns = [' '.join(c.split()) for c in df_consol.columns.astype(str)]
-            df_consol = df_consol.rename(columns={
-                'Contrato Ariba': 'contrato_ariba', 'Área': 'area', 'Gerencia': 'gerencia',
-                'Planta': 'planta', 'Comprador Táctico': 'comprador_tactico',
-                'Comprador Estratégico': 'comprador_estrategico_consol',
-                'Monto Garantía': 'monto_garantia', 'Vencimiento Garantía': 'vencimiento_garantia',
-                'Tipo Garantía': 'tipo_garantia', 'N° Garantia': 'n_garantia',
-                'Moneda Garantía': 'moneda_garantia', 'Aplica Boleta de Garantía (Ariba)': 'boleta_ariba',
-                'Aplica Boleta de Garantía (Contrato firmado)': 'boleta_contrato',
-                'Administrador de Contrato': 'administrador_contrato', 'Correo Electrónico': 'correo',
-                'Ingresa a Planta': 'ingresa_planta', 'Contratos Indefinidos': 'contratos_indefinidos',
-            })
-            cols_merge = [c for c in ['contrato_ariba', 'area', 'gerencia', 'planta', 'comprador_tactico',
-                'monto_garantia', 'vencimiento_garantia', 'tipo_garantia', 'n_garantia', 'moneda_garantia',
-                'boleta_ariba', 'boleta_contrato', 'administrador_contrato', 'correo', 'ingresa_planta', 'contratos_indefinidos'
-            ] if c in df_consol.columns]
-            df = df_ariba.merge(df_consol[cols_merge], on='contrato_ariba', how='left')
-        else:
-            df = df_ariba.copy()
-        df_bg = pd.DataFrame()
-        if 'BG' in sheets:
-            df_bg = sheets['BG'].dropna(how='all').dropna(axis=1, how='all').copy()
-            df_bg.columns = df_bg.columns.astype(str).str.strip().str.lower().str.replace(' ', '_').str.replace('-', '_')
-        hoy = pd.Timestamp.today().normalize()
-        df['fecha_termino'] = df['fecha_termino'].apply(parse_fecha)
-        df['fecha_inicio'] = df['fecha_inicio'].apply(parse_fecha)
-        if 'vencimiento_garantia' in df.columns:
-            df['vencimiento_garantia'] = df['vencimiento_garantia'].apply(parse_fecha)
-        df['dias_para_vencimiento'] = (df['fecha_termino'] - hoy).dt.days
-        def es_indef(row):
-            raw = str(row.get('es_indefinido_raw', '')).strip().lower()
-            if raw in ['sí', 'si', 'yes', '1', 'true', 'indefinido']: return True
-            if pd.notna(row.get('fecha_termino')) and row['fecha_termino'].year > 2100: return True
-            if pd.notna(row.get('contratos_indefinidos')):
-                v = str(row['contratos_indefinidos']).strip().lower()
-                if v in ['sí', 'si', 'yes', 'indefinido']: return True
-            return False
-        df['es_indefinido'] = df.apply(es_indef, axis=1)
-        df['riesgo_spot'] = df.apply(lambda r: clasificar_riesgo_contrato(str(r.get('estado_contrato', '')), r.get('dias_para_vencimiento'), r.get('es_indefinido', False)), axis=1)
-        if 'monto_contrato' in df.columns:
-            df['monto_contrato_num'] = pd.to_numeric(df['monto_contrato'], errors='coerce').fillna(0)
-        if 'monto_garantia' in df.columns:
-            df['monto_garantia_num'] = df['monto_garantia'].apply(limpiar_monto)
-        df = df[df['contrato_ariba'].notna() & (df['contrato_ariba'].astype(str).str.strip() != '')]
-        reporte = {
-            'fuente_principal': 'Info Ariba (limpio)',
-            'contratos_totales': len(df),
-            'sin_fecha_termino': int(df['fecha_termino'].isna().sum()),
-            'sin_proveedor': int(df['proveedor'].isna().sum()),
-            'sin_area': int(df['area'].isna().sum()) if 'area' in df.columns else 'N/A',
-            'compradores_unicos': df['comprador_estrategico'].nunique(),
-        }
-        return df, df_bg, reporte
+        df["comprador"] = "Sin asignar"
 
-# ==============================
-# 📊 FUNCIONES DE VISUALIZACIÓN
-# ==============================
+    # ── Días para vencimiento
+    hoy = pd.Timestamp.today().normalize()
+    if "fecha_termino" in df.columns:
+        df["dias_vencimiento"] = (df["fecha_termino"] - hoy).dt.days
+    else:
+        df["dias_vencimiento"] = None
 
-def crear_kpi_cards(df: pd.DataFrame) -> None:
-    total = len(df)
-    vigentes = len(df[df['riesgo_spot'] == 'BAJO 🟢']) if 'riesgo_spot' in df.columns else 0
-    por_vencer = len(df[df['riesgo_spot'] == 'MEDIO 🟡']) if 'riesgo_spot' in df.columns else 0
-    vencidos = len(df[df['riesgo_spot'] == 'ALTO 🔴']) if 'riesgo_spot' in df.columns else 0
-    revisar = len(df[df['riesgo_spot'] == 'REVISAR ⚪']) if 'riesgo_spot' in df.columns else 0
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("📋 Total Contratos", f"{total:,}")
-    k2.metric("✅ Vigentes", f"{vigentes:,}", delta=f"{vigentes/total*100:.1f}%" if total else "0%")
-    k3.metric("⚠️ Por Vencer (≤30d)", f"{por_vencer:,}", delta_color="inverse")
-    k4.metric("🚨 Vencidos", f"{vencidos:,}", delta_color="inverse")
-    k5.metric("🔍 Revisar", f"{revisar:,}")
+    # ── Es indefinido
+    def _es_indefinido(row):
+        raw = str(row.get("es_indefinido_raw", "")).strip().lower()
+        if raw in ("sí", "si", "yes", "1", "true", "indefinido"):
+            return True
+        ft = row.get("fecha_termino")
+        if pd.notna(ft) and isinstance(ft, pd.Timestamp) and ft.year > 2100:
+            return True
+        return False
 
-COLOR_MAP = {'BAJO 🟢': '#27ae60', 'MEDIO 🟡': '#f39c12', 'ALTO 🔴': '#e74c3c', 'REVISAR ⚪': '#95a5a6'}
+    df["es_indefinido"] = df.apply(_es_indefinido, axis=1)
 
-def crear_grafico_riesgo(df: pd.DataFrame) -> go.Figure:
-    if 'riesgo_spot' not in df.columns or df.empty:
+    # ── Riesgo spot
+    df["riesgo"] = df.apply(
+        lambda r: calcular_riesgo(r.get("estado_contrato", ""), r.get("dias_vencimiento"), r.get("es_indefinido", False)),
+        axis=1,
+    )
+
+    # ── Garantía flag
+    if "aplica_garantia" in df.columns:
+        df["tiene_garantia"] = df["aplica_garantia"].astype(str).str.lower().str.strip().isin(["sí", "si", "yes"])
+    else:
+        df["tiene_garantia"] = False
+
+    # ── Montos limpios
+    for col in ("monto_base", "monto_original", "monto_total"):
+        if col in df:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    # ── Año inicio
+    if "fecha_inicio" in df.columns:
+        df["anio_inicio"] = df["fecha_inicio"].dt.year
+
+    # ── Mes término (para timeline)
+    if "fecha_termino" in df.columns:
+        df["mes_termino"] = df["fecha_termino"].dt.to_period("M").astype(str)
+
+    # ── Filtrar filas sin ID de contrato
+    df = df[df["contrato_ariba"].notna() & (df["contrato_ariba"].astype(str).str.strip() != "")]
+
+    return df.reset_index(drop=True)
+
+
+# ─────────────────────────────────────────────────────────────
+# COMPONENTES DE VISUALIZACIÓN
+# ─────────────────────────────────────────────────────────────
+
+def kpi_cards(df: pd.DataFrame) -> None:
+    total      = len(df)
+    vigentes   = (df["riesgo"] == "BAJO 🟢").sum()
+    medio      = (df["riesgo"] == "MEDIO 🟡").sum()
+    alto       = (df["riesgo"] == "ALTO 🔴").sum()
+    revisar    = (df["riesgo"] == "REVISAR ⚪").sum()
+    indefinidos = df["es_indefinido"].sum() if "es_indefinido" in df.columns else 0
+    con_garantia = df["tiene_garantia"].sum() if "tiene_garantia" in df.columns else 0
+    monto_tot  = df["monto_total"].sum() if "monto_total" in df.columns else 0
+    pct_vig    = f"{vigentes/total*100:.0f}% vigentes" if total else "—"
+
+    st.markdown(f"""
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Total contratos</div>
+        <div class="kpi-value">{total:,}</div>
+        <div class="kpi-sub">en la selección actual</div>
+      </div>
+      <div class="kpi-card green">
+        <div class="kpi-label">✅ Vigentes</div>
+        <div class="kpi-value">{vigentes:,}</div>
+        <div class="kpi-sub">{pct_vig}</div>
+      </div>
+      <div class="kpi-card yellow">
+        <div class="kpi-label">⚠️ Riesgo medio</div>
+        <div class="kpi-value">{medio:,}</div>
+        <div class="kpi-sub">Próximos a vencer ≤60 d</div>
+      </div>
+      <div class="kpi-card red">
+        <div class="kpi-label">🚨 Riesgo alto</div>
+        <div class="kpi-value">{alto:,}</div>
+        <div class="kpi-sub">Vencidos o cancelados</div>
+      </div>
+      <div class="kpi-card gray">
+        <div class="kpi-label">🔍 Por revisar</div>
+        <div class="kpi-value">{revisar:,}</div>
+        <div class="kpi-sub">Borrador / sin fecha</div>
+      </div>
+    </div>
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">♾️ Indefinidos</div>
+        <div class="kpi-value">{indefinidos:,}</div>
+        <div class="kpi-sub">sin fecha de término</div>
+      </div>
+      <div class="kpi-card green">
+        <div class="kpi-label">🔒 Con garantía</div>
+        <div class="kpi-value">{con_garantia:,}</div>
+        <div class="kpi-sub">aplica boleta</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">💰 Monto total</div>
+        <div class="kpi-value">{fmt_millones(monto_tot)}</div>
+        <div class="kpi-sub">contratos filtrados</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">👤 Compradores</div>
+        <div class="kpi-value">{df["comprador"].nunique():,}</div>
+        <div class="kpi-sub">propietarios únicos</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">🏢 Proveedores</div>
+        <div class="kpi-value">{df["proveedor"].nunique() if "proveedor" in df.columns else 0:,}</div>
+        <div class="kpi-sub">proveedores únicos</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def grafico_donut_riesgo(df: pd.DataFrame) -> go.Figure:
+    datos = df["riesgo"].value_counts().reset_index()
+    datos.columns = ["Riesgo", "Cantidad"]
+    colores = [COLORES_RIESGO.get(r, "#999") for r in datos["Riesgo"]]
+    fig = go.Figure(go.Pie(
+        labels=datos["Riesgo"], values=datos["Cantidad"],
+        hole=0.55, marker_colors=colores,
+        textinfo="percent+value",
+        textfont=dict(size=11, family="DM Sans"),
+        hovertemplate="<b>%{label}</b><br>%{value} contratos (%{percent})<extra></extra>",
+    ))
+    fig.update_layout(
+        title=dict(text="Distribución de Riesgo", font=dict(size=13, family="DM Sans", color="#0d1f3c"), x=0.02),
+        showlegend=True,
+        legend=dict(font=dict(family="DM Sans", size=10), orientation="h", y=-0.12),
+        paper_bgcolor="white", plot_bgcolor="white",
+        margin=dict(t=40, b=30, l=10, r=10),
+        height=280,
+    )
+    return fig
+
+
+def grafico_timeline_vencimientos(df: pd.DataFrame) -> go.Figure | None:
+    if "fecha_termino" not in df.columns:
+        return None
+    hoy = pd.Timestamp.today().normalize()
+    df_f = df[df["fecha_termino"].notna() & (df["dias_vencimiento"].between(-30, 180))].copy()
+    if df_f.empty:
+        return None
+    df_f["mes"] = df_f["fecha_termino"].dt.to_period("M").astype(str)
+    agrup = df_f.groupby(["mes", "riesgo"]).size().reset_index(name="n")
+    fig = px.bar(
+        agrup, x="mes", y="n", color="riesgo",
+        color_discrete_map=COLORES_RIESGO,
+        title="Vencimientos próximos 6 meses",
+        labels={"mes": "Mes", "n": "Contratos", "riesgo": "Riesgo"},
+        barmode="stack",
+    )
+    fig.update_layout(
+        paper_bgcolor="white", plot_bgcolor="white",
+        font=dict(family="DM Sans", size=10, color="#374151"),
+        title=dict(font=dict(size=13, color="#0d1f3c")),
+        xaxis=dict(tickangle=-30, gridcolor="#f3f4f6"),
+        yaxis=dict(gridcolor="#f3f4f6"),
+        legend=dict(orientation="h", y=-0.25, font=dict(size=10)),
+        margin=dict(t=40, b=60, l=10, r=10),
+        height=280,
+    )
+    return fig
+
+
+def grafico_compradores(df: pd.DataFrame) -> go.Figure:
+    dc = df.groupby(["comprador", "riesgo"]).size().reset_index(name="n")
+    # Ordenar por total
+    orden = df["comprador"].value_counts().index.tolist()
+    dc["comprador"] = pd.Categorical(dc["comprador"], categories=orden[::-1], ordered=True)
+    dc = dc.sort_values("comprador")
+    fig = px.bar(
+        dc, y="comprador", x="n", color="riesgo",
+        color_discrete_map=COLORES_RIESGO, barmode="stack", orientation="h",
+        title="Contratos por comprador (propietario Ariba)",
+        labels={"comprador": "", "n": "Contratos", "riesgo": "Riesgo"},
+    )
+    fig.update_layout(
+        paper_bgcolor="white", plot_bgcolor="white",
+        font=dict(family="DM Sans", size=10, color="#374151"),
+        title=dict(font=dict(size=13, color="#0d1f3c")),
+        xaxis=dict(gridcolor="#f3f4f6"),
+        yaxis=dict(tickfont=dict(size=9)),
+        legend=dict(orientation="h", y=-0.1, font=dict(size=10)),
+        margin=dict(t=40, b=60, l=10, r=10),
+        height=max(280, len(df["comprador"].unique()) * 22),
+    )
+    return fig
+
+
+def grafico_estados(df: pd.DataFrame) -> go.Figure:
+    datos = df["estado_contrato"].value_counts().reset_index()
+    datos.columns = ["Estado", "Cantidad"]
+    fig = px.bar(
+        datos, x="Cantidad", y="Estado", orientation="h",
+        title="Contratos por estado Ariba",
+        color="Cantidad", color_continuous_scale="Blues",
+        labels={"Cantidad": "Contratos", "Estado": ""},
+    )
+    fig.update_layout(
+        paper_bgcolor="white", plot_bgcolor="white",
+        font=dict(family="DM Sans", size=10, color="#374151"),
+        title=dict(font=dict(size=13, color="#0d1f3c")),
+        xaxis=dict(gridcolor="#f3f4f6"),
+        yaxis=dict(categoryorder="total ascending", tickfont=dict(size=9)),
+        coloraxis_showscale=False,
+        margin=dict(t=40, b=20, l=10, r=10),
+        height=280,
+    )
+    return fig
+
+
+def grafico_evolucion_anual(df: pd.DataFrame) -> go.Figure | None:
+    if "anio_inicio" not in df.columns:
+        return None
+    anios = df["anio_inicio"].dropna().astype(int)
+    anios = anios[(anios >= 2015) & (anios <= datetime.now().year + 1)]
+    if anios.empty:
+        return None
+    conteo = anios.value_counts().sort_index().reset_index()
+    conteo.columns = ["Año", "Contratos"]
+    fig = px.area(
+        conteo, x="Año", y="Contratos",
+        title="Contratos iniciados por año",
+        color_discrete_sequence=["#1a56db"],
+    )
+    fig.update_traces(fill="tozeroy", line_color="#1a56db", fillcolor="rgba(26,86,219,0.12)")
+    fig.update_layout(
+        paper_bgcolor="white", plot_bgcolor="white",
+        font=dict(family="DM Sans", size=10, color="#374151"),
+        title=dict(font=dict(size=13, color="#0d1f3c")),
+        xaxis=dict(gridcolor="#f3f4f6", dtick=1),
+        yaxis=dict(gridcolor="#f3f4f6"),
+        margin=dict(t=40, b=20, l=10, r=10),
+        height=250,
+    )
+    return fig
+
+
+def grafico_top_proveedores(df: pd.DataFrame, n: int = 15) -> go.Figure:
+    if "proveedor" not in df.columns:
         return go.Figure()
-    datos = df['riesgo_spot'].value_counts().reset_index()
-    datos.columns = ['Riesgo', 'Cantidad']
-    fig = px.pie(datos, values='Cantidad', names='Riesgo', color='Riesgo', color_discrete_map=COLOR_MAP, title="🎯 Distribución de Riesgo", hole=0.4)
-    fig.update_traces(textinfo='percent+label')
+    top = df["proveedor"].value_counts().head(n).reset_index()
+    top.columns = ["Proveedor", "Contratos"]
+    # Nombre corto para eje
+    top["Proveedor"] = top["Proveedor"].str[:45]
+    fig = px.bar(
+        top, y="Proveedor", x="Contratos", orientation="h",
+        title=f"Top {n} proveedores por nº de contratos",
+        color="Contratos", color_continuous_scale="Teal",
+    )
+    fig.update_layout(
+        paper_bgcolor="white", plot_bgcolor="white",
+        font=dict(family="DM Sans", size=10, color="#374151"),
+        title=dict(font=dict(size=13, color="#0d1f3c")),
+        xaxis=dict(gridcolor="#f3f4f6"),
+        yaxis=dict(categoryorder="total ascending", tickfont=dict(size=9)),
+        coloraxis_showscale=False,
+        margin=dict(t=40, b=20, l=10, r=10),
+        height=max(280, n * 22),
+    )
     return fig
 
-def crear_timeline_vencimientos(df: pd.DataFrame) -> go.Figure:
-    if 'dias_para_vencimiento' not in df.columns or df.empty: return None
-    df_f = df[(df['dias_para_vencimiento'] >= -30) & (df['dias_para_vencimiento'] <= 90)].copy()
-    df_f = df_f.dropna(subset=['fecha_termino'])
-    if df_f.empty: return None
-    df_f['mes_venc'] = df_f['fecha_termino'].dt.to_period('M').astype(str)
-    agrup = df_f.groupby('mes_venc').size().reset_index(name='Cantidad')
-    fig = px.bar(agrup, x='mes_venc', y='Cantidad', title="📅 Vencimientos Próximos (90 días)", color='Cantidad', color_continuous_scale='YlOrRd')
-    fig.update_layout(xaxis_title="Mes", yaxis_title="Contratos")
+
+def grafico_monto_comprador(df: pd.DataFrame) -> go.Figure | None:
+    if "monto_total" not in df.columns:
+        return None
+    dm = df.groupby("comprador")["monto_total"].sum().reset_index()
+    dm = dm[dm["monto_total"] > 0].sort_values("monto_total", ascending=True).tail(15)
+    if dm.empty:
+        return None
+    fig = px.bar(
+        dm, y="comprador", x="monto_total", orientation="h",
+        title="Monto total de contratos por comprador (CLP)",
+        color="monto_total", color_continuous_scale="Purp",
+        labels={"comprador": "", "monto_total": "Monto CLP"},
+    )
+    fig.update_traces(hovertemplate="<b>%{y}</b><br>$%{x:,.0f}<extra></extra>")
+    fig.update_layout(
+        paper_bgcolor="white", plot_bgcolor="white",
+        font=dict(family="DM Sans", size=10, color="#374151"),
+        title=dict(font=dict(size=13, color="#0d1f3c")),
+        xaxis=dict(gridcolor="#f3f4f6"),
+        yaxis=dict(tickfont=dict(size=9)),
+        coloraxis_showscale=False,
+        margin=dict(t=40, b=20, l=10, r=10),
+        height=300,
+    )
     return fig
 
-def crear_tabla_alertas(df: pd.DataFrame) -> pd.DataFrame:
-    if 'riesgo_spot' not in df.columns or df.empty:
-        return pd.DataFrame()
-    mask_riesgo = df['riesgo_spot'].isin(['ALTO 🔴', 'MEDIO 🟡'])
-    mask_bg = pd.Series([False] * len(df), index=df.index)
-    if 'aplica_garantia' in df.columns:
-        mask_bg = df['aplica_garantia'].astype(str).str.lower().str.contains('sí|si|yes', na=False)
-    alertas = []
-    for _, row in df[mask_riesgo & mask_bg].iterrows():
-        alertas.append({
-            'Contrato': row.get('contrato_ariba', 'N/A'), 'Proveedor': row.get('proveedor', 'N/A'),
-            'Comprador': row.get('comprador_estrategico', 'N/A'), 'Riesgo': row.get('riesgo_spot', 'N/A'),
-            'Días Restantes': row.get('dias_para_vencimiento', 'N/A'), 'Estado Contrato': row.get('estado_contrato', 'N/A'),
-            'Monto Garantía': f"{row.get('monto_contrato_num', 0):,.0f}" if 'monto_contrato_num' in row else 'N/A',
-            'Acción': 'Renovar' if row.get('riesgo_spot') == 'MEDIO 🟡' else 'Regularizar',
-        })
-    return pd.DataFrame(alertas).sort_values('Días Restantes') if alertas else pd.DataFrame()
 
-# ==============================
-# 🎛️ INTERFAZ PRINCIPAL
-# ==============================
+def tabla_alertas(df: pd.DataFrame) -> pd.DataFrame:
+    criticos = df[df["riesgo"].isin(["ALTO 🔴", "MEDIO 🟡"])].copy()
+    cols = [c for c in ["contrato_ariba", "proveedor", "comprador", "estado_contrato",
+                         "dias_vencimiento", "riesgo", "tiene_garantia", "monto_total"] if c in criticos.columns]
+    alertas = criticos[cols].copy()
+    renombres = {
+        "contrato_ariba": "Contrato",
+        "proveedor": "Proveedor",
+        "comprador": "Comprador",
+        "estado_contrato": "Estado",
+        "dias_vencimiento": "Días restantes",
+        "riesgo": "Riesgo",
+        "tiene_garantia": "Garantía",
+        "monto_total": "Monto CLP",
+    }
+    alertas = alertas.rename(columns={k: v for k, v in renombres.items() if k in alertas.columns})
+    if "Días restantes" in alertas.columns:
+        alertas = alertas.sort_values("Días restantes")
+    return alertas
 
-st.title("📋 Dashboard de Gestión de Contratos")
-st.markdown("**Softys Chile** · Compras Estratégicas y Tácticas · Fuente: Pivot Ariba (crudo)")
-st.divider()
+
+# ─────────────────────────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/1/14/Softys_logo.svg/320px-Softys_logo.svg.png", use_container_width=True)
-    st.header("📁 Carga de Archivo")
-    
-    modo_carga = st.radio("Tipo de archivo", ["🔄 Pivot crudo de Ariba", "📄 Consolidado ya limpio"], index=0)
-    uploaded_file = st.file_uploader(
-        "Sube el archivo (.xlsx)",
-        type=['xlsx', 'xls'],
-        help="Pivot crudo: archivo directo de Ariba Analysis. Consolidado: archivo ya procesado con hojas Info Ariba, Consolidado, etc."
-    )
-    st.divider()
-    st.caption("💡 El archivo se procesa localmente. Ningún dato sale de tu equipo.")
-
-if not uploaded_file:
-    st.info("👆 Sube el archivo **Pivot de Ariba** o **Consolidado de Contratos** para comenzar.")
     st.markdown("""
-    ### ¿Qué verás en este dashboard?
-    - 🔴 **Alertas de contratos vencidos y por vencer**
-    - 📊 **KPIs de riesgo spot** por gerencia, área y comprador
-    - 🔍 **Análisis de boletas de garantía**
-    - 📥 **Exportación filtrada** lista para reportes
+    <div style="padding: 8px 0 20px; border-bottom: 1px solid #2e5490;">
+      <div style="font-size:1.2rem; font-weight:700; letter-spacing:.02em;">📋 Contratos</div>
+      <div style="font-size:0.72rem; opacity:.7; margin-top:2px;">Softys Chile · Compras Estratégicas</div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    > **Modo Pivot crudo:** Se parsea automáticamente el archivo de Ariba Analysis, se validan compradores contra lista maestra y se filtran contratos cerrados.
-    > **Modo Consolidado:** Usa el archivo ya procesado con hojas Info Ariba, Consolidado, BG, etc.
-    """)
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+    st.markdown("**📁 Cargar archivo Pivot**")
+    uploaded = st.file_uploader(
+        "Sube el Pivot (.xlsx) descargado de Ariba",
+        type=["xlsx", "xls"],
+        label_visibility="collapsed",
+    )
+    st.caption("Archivo directo de SAP Ariba Analysis (hoja Data)")
+
+    st.markdown("---")
+
+    if uploaded:
+        st.markdown("**🎛️ Filtros**")
+        # Placeholder: se rellenarán después de cargar los datos
+        filtro_placeholder = st.empty()
+
+
+if not uploaded:
+    # ── PANTALLA DE BIENVENIDA
+    st.markdown("""
+    <div style="display:flex; flex-direction:column; align-items:center; justify-content:center;
+         padding: 80px 40px; text-align:center;">
+      <div style="font-size:3.5rem; margin-bottom:16px;">📋</div>
+      <h1 style="font-size:1.8rem; font-weight:700; color:#0d1f3c; margin-bottom:8px;">
+        Dashboard de Gestión de Contratos
+      </h1>
+      <p style="color:#6b7280; font-size:1rem; max-width:480px; line-height:1.6;">
+        Sube el archivo <strong>Pivot</strong> descargado directamente desde
+        <strong>SAP Ariba Analysis</strong> para visualizar todos tus indicadores al instante.
+      </p>
+      <div style="margin-top:32px; display:grid; grid-template-columns:1fr 1fr 1fr; gap:20px; max-width:600px;">
+        <div style="background:#f0fdf4; border-radius:10px; padding:16px; border:1px solid #d1fae5;">
+          <div style="font-size:1.5rem">📊</div>
+          <div style="font-weight:600; font-size:.85rem; margin-top:6px;">10 KPIs automáticos</div>
+          <div style="font-size:.75rem; color:#6b7280; margin-top:4px;">riesgo, montos, garantías</div>
+        </div>
+        <div style="background:#eff6ff; border-radius:10px; padding:16px; border:1px solid #dbeafe;">
+          <div style="font-size:1.5rem">🔍</div>
+          <div style="font-weight:600; font-size:.85rem; margin-top:6px;">Filtros dinámicos</div>
+          <div style="font-size:.75rem; color:#6b7280; margin-top:4px;">comprador, estado, riesgo</div>
+        </div>
+        <div style="background:#fefce8; border-radius:10px; padding:16px; border:1px solid #fde68a;">
+          <div style="font-size:1.5rem">⚠️</div>
+          <div style="font-weight:600; font-size:.85rem; margin-top:6px;">Alertas de vencimiento</div>
+          <div style="font-size:.75rem; color:#6b7280; margin-top:4px;">acción inmediata</div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
     st.stop()
 
-if uploaded_file.size > MAX_FILE_SIZE_BYTES:
-    st.error("❌ Archivo demasiado grande (máx. 50 MB).")
+# ─────────────────────────────────────────────────────────────
+# CARGA DE DATOS
+# ─────────────────────────────────────────────────────────────
+
+if uploaded.size > MAX_FILE_MB * 1024 * 1024:
+    st.error(f"❌ Archivo demasiado grande (máx. {MAX_FILE_MB} MB).")
     st.stop()
 
-uploaded_file.seek(0)
-content = uploaded_file.read()
-h = hashlib.md5(content).hexdigest()
+uploaded.seek(0)
+content = uploaded.read()
+file_hash = hashlib.md5(content).hexdigest()
 
-try:
-    with st.spinner("🔄 Procesando datos (modo: " + ("Pivot crudo" if modo_carga == "🔄 Pivot crudo de Ariba" else "Consolidado limpio") + ")..."):
-        usar_crudo = (modo_carga == "🔄 Pivot crudo de Ariba")
-        df, df_bg, reporte_calidad = cargar_y_procesar_contratos(h, content, usar_pivot_crudo=usar_crudo)
-except Exception as e:
-    st.error(f"❌ Error al procesar el archivo: {str(e)}")
+with st.spinner("🔄 Procesando el Pivot de Ariba..."):
+    try:
+        df_full = cargar_pivot(file_hash, content)
+    except Exception as exc:
+        st.error(f"❌ No se pudo procesar el archivo: {exc}")
+        st.stop()
+
+if df_full.empty:
+    st.error("❌ No se encontraron contratos válidos. Verifica que sea un Pivot válido de Ariba.")
     st.stop()
+
+# ─────────────────────────────────────────────────────────────
+# FILTROS EN SIDEBAR (ahora que tenemos datos)
+# ─────────────────────────────────────────────────────────────
+
+with st.sidebar:
+    with filtro_placeholder.container():
+        # Riesgo
+        opciones_riesgo = ["Todos"] + sorted(df_full["riesgo"].dropna().unique().tolist())
+        sel_riesgo = st.selectbox("🚦 Riesgo spot", opciones_riesgo)
+
+        # Comprador
+        compradores_lista = ["Todos"] + sorted(df_full["comprador"].dropna().unique().tolist())
+        sel_comprador = st.selectbox("👤 Comprador", compradores_lista)
+
+        # Estado contrato
+        estados_lista = ["Todos"] + sorted(df_full["estado_contrato"].dropna().unique().tolist())
+        sel_estado = st.selectbox("📄 Estado contrato", estados_lista)
+
+        # Garantía
+        sel_garantia = st.selectbox("🔒 Garantía", ["Todas", "Con garantía", "Sin garantía"])
+
+        # Año inicio
+        if "anio_inicio" in df_full.columns:
+            anios_disp = sorted(df_full["anio_inicio"].dropna().astype(int).unique().tolist())
+            if anios_disp:
+                sel_anio = st.selectbox("📅 Año inicio", ["Todos"] + [str(a) for a in anios_disp])
+            else:
+                sel_anio = "Todos"
+        else:
+            sel_anio = "Todos"
+
+        # Es indefinido
+        sel_indefinido = st.selectbox("♾️ Contratos indefinidos", ["Todos", "Solo indefinidos", "Solo con fecha"])
+
+        st.markdown("---")
+        st.caption(f"📁 {uploaded.name}\n\n{len(df_full):,} contratos cargados")
+
+# ─────────────────────────────────────────────────────────────
+# APLICAR FILTROS
+# ─────────────────────────────────────────────────────────────
+
+df = df_full.copy()
+if sel_riesgo != "Todos":
+    df = df[df["riesgo"] == sel_riesgo]
+if sel_comprador != "Todos":
+    df = df[df["comprador"] == sel_comprador]
+if sel_estado != "Todos":
+    df = df[df["estado_contrato"] == sel_estado]
+if sel_garantia == "Con garantía":
+    df = df[df["tiene_garantia"]]
+elif sel_garantia == "Sin garantía":
+    df = df[~df["tiene_garantia"]]
+if sel_anio != "Todos" and "anio_inicio" in df.columns:
+    df = df[df["anio_inicio"] == int(sel_anio)]
+if sel_indefinido == "Solo indefinidos":
+    df = df[df["es_indefinido"]]
+elif sel_indefinido == "Solo con fecha":
+    df = df[~df["es_indefinido"]]
 
 if df.empty:
-    st.error("❌ No se encontraron contratos válidos después del procesamiento.")
+    st.warning("⚠️ No hay contratos que coincidan con los filtros seleccionados.")
     st.stop()
 
-# ==============================
-# 🎛️ FILTROS EN SIDEBAR
-# ==============================
+# ─────────────────────────────────────────────────────────────
+# ENCABEZADO
+# ─────────────────────────────────────────────────────────────
 
-with st.sidebar:
-    st.header("🎛️ Filtros")
-    estados = ['Todos'] + sorted(df['riesgo_spot'].dropna().unique().tolist()) if 'riesgo_spot' in df.columns else ['Todos']
-    riesgo_sel = st.selectbox("Riesgo Spot", estados)
-    compradores = ['Todos'] + sorted(df['comprador_estrategico'].dropna().unique().astype(str).tolist()) if 'comprador_estrategico' in df.columns else ['Todos']
-    comprador_sel = st.selectbox("👤 Comprador Estratégico", compradores)
-    if 'gerencia' in df.columns:
-        gerencias = ['Todas'] + sorted(df['gerencia'].dropna().unique().astype(str).tolist())
-        gerencia_sel = st.selectbox("Gerencia", gerencias)
-    else:
-        gerencia_sel = 'Todas'
-    if 'region' in df.columns:
-        areas = ['Todas'] + sorted(df['region'].dropna().unique().astype(str).tolist())
-        area_sel = st.selectbox("Área/Región", areas)
-    else:
-        area_sel = 'Todas'
-    estados_contrato = ['Todos'] + sorted(df['estado_contrato'].dropna().unique().astype(str).tolist()) if 'estado_contrato' in df.columns else ['Todos']
-    estado_sel = st.selectbox("Estado Contrato", estados_contrato)
+st.markdown(f"""
+<div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:8px;">
+  <div>
+    <h1 style="font-size:1.5rem; font-weight:700; color:#0d1f3c; margin:0; line-height:1.2;">
+      Dashboard de Gestión de Contratos
+    </h1>
+    <div style="color:#6b7280; font-size:0.8rem; margin-top:3px;">
+      Softys Chile · Fuente: Pivot Ariba · {df['contrato_ariba'].nunique():,} contratos activos
+    </div>
+  </div>
+  <div style="font-size:0.75rem; color:#9ca3af;">
+    Actualizado: {datetime.now().strftime('%d/%m/%Y %H:%M')}
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-# Aplicar filtros
-df_f = df.copy()
-if riesgo_sel != 'Todos' and 'riesgo_spot' in df_f.columns:
-    df_f = df_f[df_f['riesgo_spot'] == riesgo_sel]
-if comprador_sel != 'Todos' and 'comprador_estrategico' in df_f.columns:
-    df_f = df_f[df_f['comprador_estrategico'] == comprador_sel]
-if gerencia_sel != 'Todas' and 'gerencia' in df_f.columns:
-    df_f = df_f[df_f['gerencia'] == gerencia_sel]
-if area_sel != 'Todas' and 'region' in df_f.columns:
-    df_f = df_f[df_f['region'] == area_sel]
-if estado_sel != 'Todos' and 'estado_contrato' in df_f.columns:
-    df_f = df_f[df_f['estado_contrato'] == estado_sel]
+# ─────────────────────────────────────────────────────────────
+# KPIs
+# ─────────────────────────────────────────────────────────────
 
-# ==============================
-# 📊 KPIs Y GRÁFICOS
-# ==============================
+kpi_cards(df)
 
-st.subheader("📊 Resumen Ejecutivo")
-crear_kpi_cards(df_f)
-col_graf1, col_graf2 = st.columns(2)
-with col_graf1:
-    st.plotly_chart(crear_grafico_riesgo(df_f), use_container_width=True)
-with col_graf2:
-    fig_tl = crear_timeline_vencimientos(df_f)
+# ─────────────────────────────────────────────────────────────
+# FILA 1 DE GRÁFICOS: Riesgo + Timeline + Estados
+# ─────────────────────────────────────────────────────────────
+
+col1, col2, col3 = st.columns([1, 1.4, 1.2])
+with col1:
+    st.plotly_chart(grafico_donut_riesgo(df), use_container_width=True)
+with col2:
+    fig_tl = grafico_timeline_vencimientos(df)
     if fig_tl:
         st.plotly_chart(fig_tl, use_container_width=True)
+    else:
+        st.info("Sin datos de vencimiento en el rango seleccionado.")
+with col3:
+    st.plotly_chart(grafico_estados(df), use_container_width=True)
 
-# ==============================
-# 🚨 ALERTAS
-# ==============================
+# ─────────────────────────────────────────────────────────────
+# ALERTAS DE ACCIÓN INMEDIATA
+# ─────────────────────────────────────────────────────────────
 
-st.subheader("🚨 Alertas de Acción Inmediata")
-df_alertas = crear_tabla_alertas(df_f)
+st.markdown('<div class="section-title">🚨 Alertas de Acción Inmediata</div>', unsafe_allow_html=True)
+
+df_alertas = tabla_alertas(df)
 if not df_alertas.empty:
     def highlight_risk(val):
-        if 'ALTO' in str(val): return 'background-color: #fef2f2'
-        if 'MEDIO' in str(val): return 'background-color: #fffbeb'
-        return ''
-    st.dataframe(df_alertas.style.map(highlight_risk, subset=['Riesgo']), use_container_width=True)
-    st.info(f"💡 **{len(df_alertas)} contratos** requieren acción inmediata.")
+        if "ALTO" in str(val):
+            return "background-color:#fef2f2; color:#991b1b; font-weight:600;"
+        if "MEDIO" in str(val):
+            return "background-color:#fffbeb; color:#92400e; font-weight:600;"
+        return ""
+
+    styled = df_alertas.style.map(highlight_risk, subset=["Riesgo"] if "Riesgo" in df_alertas.columns else [])
+    if "Monto CLP" in df_alertas.columns:
+        styled = styled.format({"Monto CLP": "{:,.0f}", "Días restantes": "{:.0f}"}, na_rep="—")
+    st.dataframe(styled, use_container_width=True, height=260)
+    col_a, col_b = st.columns(2)
+    col_a.info(f"💡 **{(df_alertas['Riesgo'] == 'ALTO 🔴').sum() if 'Riesgo' in df_alertas.columns else 0}** contratos en riesgo ALTO requieren regularización urgente.")
+    col_b.warning(f"⚠️ **{(df_alertas['Riesgo'] == 'MEDIO 🟡').sum() if 'Riesgo' in df_alertas.columns else 0}** contratos próximos a vencer deben renovarse.")
 else:
-    st.success("✅ No hay contratos críticos con boleta de garantía pendiente.")
+    st.success("✅ No hay contratos en riesgo alto o medio con los filtros actuales.")
 
-# ==============================
-# 📋 TABS PRINCIPALES
-# ==============================
+# ─────────────────────────────────────────────────────────────
+# TABS
+# ─────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Resumen General", "🏢 Por Área / Estado", "🔒 Garantías", "🔍 Explorador"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📌 Por Comprador",
+    "🏢 Proveedores",
+    "💰 Montos",
+    "🔒 Garantías",
+    "🔍 Explorador",
+])
 
+# ── TAB 1: Por Comprador
 with tab1:
+    st.plotly_chart(grafico_compradores(df), use_container_width=True)
+    # Tabla resumen por comprador
+    resumen = df.groupby("comprador").agg(
+        Contratos=("contrato_ariba", "count"),
+        Riesgo_Alto=("riesgo", lambda x: (x == "ALTO 🔴").sum()),
+        Riesgo_Medio=("riesgo", lambda x: (x == "MEDIO 🟡").sum()),
+        Vigentes=("riesgo", lambda x: (x == "BAJO 🟢").sum()),
+        Indefinidos=("es_indefinido", "sum"),
+        Con_Garantia=("tiene_garantia", "sum"),
+    ).reset_index().sort_values("Contratos", ascending=False)
+    st.dataframe(resumen, use_container_width=True, height=300)
+
+# ── TAB 2: Proveedores
+with tab2:
     c1, c2 = st.columns(2)
     with c1:
-        if 'estado_contrato' in df_f.columns:
-            estado_counts = df_f['estado_contrato'].value_counts().reset_index()
-            estado_counts.columns = ['Estado', 'Cantidad']
-            fig_est = px.bar(estado_counts, x='Cantidad', y='Estado', orientation='h', title='Contratos por Estado', color='Cantidad', color_continuous_scale='Blues')
-            fig_est.update_layout(yaxis={'categoryorder': 'total ascending'})
-            st.plotly_chart(fig_est, use_container_width=True)
+        st.plotly_chart(grafico_top_proveedores(df, 15), use_container_width=True)
     with c2:
-        if 'region' in df_f.columns:
-            df_region = df_f.groupby(['region', 'riesgo_spot']).size().reset_index(name='Cantidad')
-            fig_riesgo = px.bar(df_region, x='region', y='Cantidad', color='riesgo_spot', title='Riesgo por Área/Región', color_discrete_map=COLOR_MAP, barmode='stack')
-            fig_riesgo.update_layout(xaxis_tickangle=-45)
-            st.plotly_chart(fig_riesgo, use_container_width=True)
-    if 'comprador_estrategico' in df_f.columns:
-        comp_counts = df_f.groupby(['comprador_estrategico', 'riesgo_spot']).size().reset_index(name='Cantidad')
-        fig_comp = px.bar(comp_counts, x='Cantidad', y='comprador_estrategico', color='riesgo_spot', title='📌 Contratos por Comprador', barmode='stack', orientation='h', color_discrete_map=COLOR_MAP)
-        fig_comp.update_layout(yaxis={'categoryorder': 'total ascending'}, height=400)
-        st.plotly_chart(fig_comp, use_container_width=True)
+        # Proveedores con más riesgo
+        if "proveedor" in df.columns:
+            prov_riesgo = df[df["riesgo"] == "ALTO 🔴"].groupby("proveedor").size().reset_index(name="Contratos vencidos")
+            prov_riesgo = prov_riesgo.sort_values("Contratos vencidos", ascending=False).head(15)
+            if not prov_riesgo.empty:
+                fig_pr = px.bar(prov_riesgo, y="proveedor", x="Contratos vencidos", orientation="h",
+                                title="Proveedores con más contratos vencidos",
+                                color="Contratos vencidos", color_continuous_scale="Reds")
+                fig_pr.update_layout(
+                    paper_bgcolor="white", plot_bgcolor="white",
+                    font=dict(family="DM Sans", size=10),
+                    coloraxis_showscale=False,
+                    yaxis=dict(categoryorder="total ascending", tickfont=dict(size=9)),
+                    height=380,
+                    margin=dict(t=40, b=20),
+                )
+                st.plotly_chart(fig_pr, use_container_width=True)
+            else:
+                st.success("✅ Ningún proveedor tiene contratos en riesgo ALTO con los filtros actuales.")
 
-with tab2:
-    if 'region' in df_f.columns:
-        df_area = df_f.groupby(['region', 'riesgo_spot']).size().reset_index(name='Cantidad')
-        top_areas = df_f['region'].value_counts().head(12).index
-        df_area = df_area[df_area['region'].isin(top_areas)]
-        fig_area = px.bar(df_area, x='Cantidad', y='region', color='riesgo_spot', title='Top 12 Áreas por Riesgo', barmode='stack', orientation='h', color_discrete_map=COLOR_MAP)
-        fig_area.update_layout(yaxis={'categoryorder': 'total ascending'})
-        st.plotly_chart(fig_area, use_container_width=True)
-    else:
-        st.info("ℹ️ Columna 'Área/Región' no disponible en este modo.")
-
+# ── TAB 3: Montos
 with tab3:
-    if 'aplica_garantia' in df.columns:
-        df_con_bg = df_f[df_f['aplica_garantia'].astype(str).str.lower().str.contains('sí|si|yes', na=False)]
-        if not df_con_bg.empty:
-            st.success(f"✅ {len(df_con_bg)} contratos con garantía aplicada están siendo monitoreados.")
-        else:
-            st.info("ℹ️ No hay contratos con garantía aplicada en los datos filtrados.")
-    else:
-        st.info("ℹ️ Campo 'Aplica Garantía' no disponible en este modo.")
+    fig_evol = grafico_evolucion_anual(df)
+    if fig_evol:
+        st.plotly_chart(fig_evol, use_container_width=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        fig_mc = grafico_monto_comprador(df)
+        if fig_mc:
+            st.plotly_chart(fig_mc, use_container_width=True)
+    with c2:
+        # Monto por estado
+        if "monto_total" in df.columns:
+            dm_est = df.groupby("estado_contrato")["monto_total"].sum().reset_index()
+            dm_est = dm_est[dm_est["monto_total"] > 0].sort_values("monto_total")
+            if not dm_est.empty:
+                fig_mest = px.bar(dm_est, y="estado_contrato", x="monto_total", orientation="h",
+                                  title="Monto total por estado del contrato",
+                                  color="monto_total", color_continuous_scale="Blues",
+                                  labels={"estado_contrato": "", "monto_total": "Monto CLP"})
+                fig_mest.update_traces(hovertemplate="<b>%{y}</b><br>$%{x:,.0f}<extra></extra>")
+                fig_mest.update_layout(
+                    paper_bgcolor="white", plot_bgcolor="white",
+                    font=dict(family="DM Sans", size=10),
+                    coloraxis_showscale=False,
+                    yaxis=dict(tickfont=dict(size=9)),
+                    height=280,
+                    margin=dict(t=40, b=20),
+                )
+                st.plotly_chart(fig_mest, use_container_width=True)
 
+    # Estadísticas de monto
+    if "monto_total" in df.columns:
+        montos = df[df["monto_total"] > 0]["monto_total"]
+        if not montos.empty:
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Monto total", fmt_millones(montos.sum()))
+            mc2.metric("Monto promedio", fmt_millones(montos.mean()))
+            mc3.metric("Monto máximo", fmt_millones(montos.max()))
+            mc4.metric("Contratos con monto", f"{len(montos):,}")
+
+# ── TAB 4: Garantías
 with tab4:
-    st.markdown("### 🔍 Explorador de Datos")
-    cols_default = [c for c in ['contrato_ariba', 'proveedor', 'comprador_estrategico', 'region', 'estado_contrato', 'fecha_termino', 'dias_para_vencimiento', 'riesgo_spot'] if c in df_f.columns]
-    col_mostrar = st.multiselect("Columnas a mostrar", options=df_f.columns.tolist(), default=cols_default)
-    search_term = st.text_input("🔎 Buscar proveedor o descripción")
-    df_view = df_f.copy()
-    if search_term:
-        mask = pd.Series([False] * len(df_view), index=df_view.index)
-        for col in ['proveedor', 'descripcion', 'contrato_ariba']:
-            if col in df_view.columns:
-                mask |= df_view[col].astype(str).str.contains(search_term, case=False, na=False)
-        df_view = df_view[mask]
-    if col_mostrar:
-        df_view = df_view[col_mostrar]
-    if 'dias_para_vencimiento' in df_view.columns:
-        df_view = df_view.sort_values('dias_para_vencimiento')
-    st.dataframe(df_view, use_container_width=True, height=450)
-    st.caption(f"Mostrando {len(df_view):,} de {len(df_f):,} contratos filtrados")
+    col_g1, col_g2 = st.columns(2)
+    with col_g1:
+        gar_counts = df["tiene_garantia"].map({True: "Con garantía ✅", False: "Sin garantía ❌"}).value_counts()
+        fig_gar = go.Figure(go.Pie(
+            labels=gar_counts.index, values=gar_counts.values,
+            hole=0.5, marker_colors=["#059669", "#e5e7eb"],
+            textinfo="percent+value",
+        ))
+        fig_gar.update_layout(
+            title="Aplicación de garantías",
+            paper_bgcolor="white",
+            font=dict(family="DM Sans", size=10),
+            height=260,
+            margin=dict(t=40, b=20),
+        )
+        st.plotly_chart(fig_gar, use_container_width=True)
 
-# ==============================
-# 📥 EXPORTACIÓN
-# ==============================
+    with col_g2:
+        # Garantías por comprador
+        gar_comp = df[df["tiene_garantia"]].groupby("comprador").size().reset_index(name="Con garantía")
+        gar_comp = gar_comp.sort_values("Con garantía", ascending=False)
+        if not gar_comp.empty:
+            fig_gc = px.bar(gar_comp, y="comprador", x="Con garantía", orientation="h",
+                            title="Contratos con garantía por comprador",
+                            color="Con garantía", color_continuous_scale="Greens",
+                            labels={"comprador": ""})
+            fig_gc.update_layout(
+                paper_bgcolor="white", plot_bgcolor="white",
+                font=dict(family="DM Sans", size=10),
+                coloraxis_showscale=False,
+                yaxis=dict(categoryorder="total ascending", tickfont=dict(size=9)),
+                height=280,
+                margin=dict(t=40, b=20),
+            )
+            st.plotly_chart(fig_gc, use_container_width=True)
 
-st.divider()
-st.subheader("📥 Exportar Resultados")
-ec1, ec2, ec3 = st.columns(3)
-with ec1:
-    csv_data = df_f.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("💾 Descargar Filtrado (CSV)", data=csv_data, file_name=f"contratos_filtrado_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
-with ec2:
-    if 'riesgo_spot' in df_f.columns:
-        criticos = df_f[df_f['riesgo_spot'].isin(['ALTO 🔴', 'MEDIO 🟡'])]
-        csv_crit = criticos.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("🔴 Solo Contratos en Riesgo", data=csv_crit, file_name=f"contratos_riesgo_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
-with ec3:
-    if 'dias_para_vencimiento' in df_f.columns:
-        urgentes = df_f[df_f['dias_para_vencimiento'].between(0, 60)]
-        csv_urg = urgentes.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("⚠️ Vencen en 60 Días", data=csv_urg, file_name=f"contratos_urgentes_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
+    # Alertas garantías: requieren pero no tienen fecha próxima
+    df_gar_vence = df[df["tiene_garantia"] & df["riesgo"].isin(["ALTO 🔴", "MEDIO 🟡"])].copy()
+    if not df_gar_vence.empty:
+        st.markdown("**⚠️ Contratos con garantía en riesgo:**")
+        cols_gar = [c for c in ["contrato_ariba", "proveedor", "comprador", "estado_contrato", "dias_vencimiento", "riesgo"] if c in df_gar_vence.columns]
+        st.dataframe(df_gar_vence[cols_gar].sort_values("dias_vencimiento"), use_container_width=True, height=220)
 
-# ==============================
-# 🔧 DIAGNÓSTICO TÉCNICO
-# ==============================
+# ── TAB 5: Explorador
+with tab5:
+    st.markdown("### 🔍 Explorador de contratos")
+    col_busq, col_top = st.columns([3, 1])
+    with col_busq:
+        busqueda = st.text_input("Buscar por proveedor, descripción o ID de contrato", placeholder="Ej: LOGISTICA, CW2284016...")
+    with col_top:
+        top_n = st.selectbox("Mostrar", [50, 100, 200, 500, "Todos"], index=1)
 
-with st.expander("🔧 Diagnóstico Técnico"):
+    cols_disponibles = df.columns.tolist()
+    cols_default = [c for c in ["contrato_ariba", "proveedor", "comprador", "estado_contrato",
+                                  "fecha_inicio", "fecha_termino", "dias_vencimiento",
+                                  "riesgo", "tiene_garantia", "monto_total", "rut"] if c in cols_disponibles]
+    cols_sel = st.multiselect("Columnas a mostrar", options=cols_disponibles, default=cols_default)
+
+    df_exp = df.copy()
+    if busqueda.strip():
+        mask = pd.Series(False, index=df_exp.index)
+        for col in ["proveedor", "descripcion", "contrato_ariba", "nombre_proyecto"]:
+            if col in df_exp.columns:
+                mask |= df_exp[col].astype(str).str.contains(busqueda.strip(), case=False, na=False)
+        df_exp = df_exp[mask]
+
+    if "dias_vencimiento" in df_exp.columns:
+        df_exp = df_exp.sort_values("dias_vencimiento")
+
+    if top_n != "Todos":
+        df_exp = df_exp.head(int(top_n))
+
+    if cols_sel:
+        df_exp = df_exp[cols_sel]
+
+    st.dataframe(df_exp, use_container_width=True, height=500)
+    st.caption(f"Mostrando {len(df_exp):,} contratos · {len(df):,} en filtro activo · {len(df_full):,} total cargado")
+
+# ─────────────────────────────────────────────────────────────
+# EXPORTACIÓN
+# ─────────────────────────────────────────────────────────────
+
+st.markdown('<div class="section-title">📥 Exportar</div>', unsafe_allow_html=True)
+ex1, ex2, ex3, ex4 = st.columns(4)
+
+ts = datetime.now().strftime("%Y%m%d_%H%M")
+
+with ex1:
+    csv = df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button("💾 Todos (filtrado) · CSV", csv,
+                       file_name=f"contratos_{ts}.csv", mime="text/csv")
+
+with ex2:
+    criticos = df[df["riesgo"].isin(["ALTO 🔴", "MEDIO 🟡"])]
+    csv_c = criticos.to_csv(index=False).encode("utf-8-sig")
+    st.download_button("🔴 Solo en riesgo · CSV", csv_c,
+                       file_name=f"contratos_riesgo_{ts}.csv", mime="text/csv")
+
+with ex3:
+    urg = df[df["dias_vencimiento"].between(0, 60)] if "dias_vencimiento" in df.columns else pd.DataFrame()
+    csv_u = urg.to_csv(index=False).encode("utf-8-sig")
+    st.download_button("⚠️ Vencen en 60 días · CSV", csv_u,
+                       file_name=f"contratos_urgentes_{ts}.csv", mime="text/csv")
+
+with ex4:
+    gar = df[df["tiene_garantia"]]
+    csv_g = gar.to_csv(index=False).encode("utf-8-sig")
+    st.download_button("🔒 Con garantía · CSV", csv_g,
+                       file_name=f"contratos_garantia_{ts}.csv", mime="text/csv")
+
+# ─────────────────────────────────────────────────────────────
+# DIAGNÓSTICO TÉCNICO
+# ─────────────────────────────────────────────────────────────
+
+with st.expander("🔧 Diagnóstico técnico"):
     d1, d2 = st.columns(2)
     with d1:
-        st.markdown("**Calidad de datos:**")
-        st.json(reporte_calidad)
-    with d2:
-        st.markdown("**Resumen del dataset:**")
+        st.markdown("**Datos cargados:**")
         st.json({
-            "Total contratos procesados": len(df),
-            "Contratos filtrados": len(df_f),
-            "Compradores únicos": int(df['comprador_estrategico'].nunique()) if 'comprador_estrategico' in df.columns else 0,
-            "Proveedores únicos": int(df['proveedor'].nunique()) if 'proveedor' in df.columns else 0,
-            "Última actualización": datetime.now().strftime('%d/%m/%Y %H:%M'),
+            "Total filas en Pivot": len(df_full),
+            "Contratos activos (sin Cerrados)": len(df_full),
+            "Con fecha inicio": int(df_full["fecha_inicio"].notna().sum()) if "fecha_inicio" in df_full.columns else "N/A",
+            "Con fecha término": int(df_full["fecha_termino"].notna().sum()) if "fecha_termino" in df_full.columns else "N/A",
+            "Con garantía": int(df_full["tiene_garantia"].sum()),
+            "Indefinidos": int(df_full["es_indefinido"].sum()),
+        })
+    with d2:
+        st.markdown("**Selección actual:**")
+        st.json({
+            "Contratos filtrados": len(df),
+            "Compradores únicos": int(df["comprador"].nunique()),
+            "Proveedores únicos": int(df["proveedor"].nunique()) if "proveedor" in df.columns else 0,
+            "Riesgo ALTO": int((df["riesgo"] == "ALTO 🔴").sum()),
+            "Riesgo MEDIO": int((df["riesgo"] == "MEDIO 🟡").sum()),
+            "Procesado": datetime.now().strftime("%d/%m/%Y %H:%M"),
         })
 
-# ==============================
-# ℹ️ FOOTER
-# ==============================
-
-st.divider()
-st.caption(f"""
-🔹 Dashboard generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}  
-🔹 **Fuente**: {"Pivot Ariba (crudo) - parseado automáticamente" if modo_carga == "🔄 Pivot crudo de Ariba" else "Consolidado de Contratos (ya limpio)"}  
-🔹 **Validación**: Compradores filtrados contra lista maestra oficial  
-🔹 **Filtros aplicados**: Contratos "Cerrados" eliminados automáticamente
-""")
-
-# ==============================
-# 🤖 ASISTENTE VIRTUAL (GEMINI)
-# ==============================
-
-import google.generativeai as genai
-st.divider()
-st.subheader("💬 Asistente Virtual de Compras")
-st.caption("Modelo: Gemini 2.0 Flash")
-api_key_gemini = st.secrets.get("GEMINI_API_KEY", None)
-if not api_key_gemini:
-    api_key_gemini = st.text_input("🔑 Tu API Key de Gemini", type="password", help="Obtén una gratis en aistudio.google.com")
-if api_key_gemini:
-    try:
-        genai.configure(api_key=api_key_gemini)
-        model = genai.GenerativeModel('gemini-2.0-flash')
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-        if prompt := st.chat_input("Ej: ¿Qué contratos vencen este mes?"):
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-            with st.chat_message("assistant"):
-                with st.spinner("🤖 Pensando..."):
-                    try:
-                        cols_ia = [c for c in ['contrato_ariba', 'proveedor', 'comprador_estrategico', 'estado_contrato', 'fecha_termino', 'riesgo_spot', 'region'] if c in df_f.columns]
-                        datos_muestra = df_f[cols_ia].head(10).to_string(index=False)
-                        prompt_sistema = f"""
-Eres un asistente de gestión de contratos de Softys Chile.
-Fuente de datos: {"Pivot Ariba procesado" if modo_carga == "🔄 Pivot crudo de Ariba" else "Consolidado de Contratos"} ({len(df_f)} contratos filtrados).
-
-MUESTRA (10 de {len(df_f)} registros):
-{datos_muestra}
-
-REGLAS:
-1. Responde SOLO con esta información.
-2. Si no está en la muestra, indica: 'No tengo ese detalle en la muestra actual'.
-3. Sé breve y directo.
-"""
-                        response = model.generate_content([prompt_sistema, prompt])
-                        respuesta = response.text
-                        st.markdown(respuesta)
-                        st.session_state.messages.append({"role": "assistant", "content": respuesta})
-                    except Exception as e:
-                        if "429" in str(e):
-                            st.error("⚠️ Límite diario de Gemini alcanzado. Intenta mañana.")
-                        else:
-                            st.error(f"Error: {str(e)}")
-    except Exception as e:
-        st.error(f"Error de configuración Gemini: {str(e)}")
-else:
-    st.info("👈 Ingresa tu API Key de Gemini para activar el asistente.")
+st.markdown(f"""
+<div style="text-align:center; color:#9ca3af; font-size:0.72rem; margin-top:32px; padding-top:16px; border-top:1px solid #f3f4f6;">
+  Softys Chile · Compras Estratégicas · Generado {datetime.now().strftime('%d/%m/%Y %H:%M')} · Fuente: SAP Ariba Analysis
+</div>
+""", unsafe_allow_html=True)
