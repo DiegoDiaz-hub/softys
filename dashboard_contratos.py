@@ -1,3 +1,4 @@
+
 """
 dashboard_pivot.py — Softys Chile · Compras Estratégicas
 =========================================================
@@ -427,7 +428,7 @@ if not up_pivot:
     st.stop()
 
 # ──────────────────────────────────────────────────────────────
-# CARGA DE DATOS (MODIFICADO PARA MOSTRAR TODOS LOS CONTRATOS OFICIALES)
+# CARGA DE DATOS
 # ──────────────────────────────────────────────────────────────
 
 up_pivot.seek(0); piv_bytes = up_pivot.read()
@@ -447,72 +448,7 @@ if up_cons:
             st.warning(f"⚠️ No se pudo leer el Consolidado: {e}")
 
 # ──────────────────────────────────────────────────────────────
-# UNIÓN DE CONTRATOS: Pivot + Consolidado (solo oficiales)
-# ──────────────────────────────────────────────────────────────
-df = df_piv.copy()  # Base principal: Pivot
-
-if df_cons_raw is not None and not df_cons_raw.empty:
-    # IDs que ya están en el Pivot
-    ids_en_pivot = set(df_piv["id"].astype(str).str.strip())
-    
-    # Filtrar Consolidado: solo contratos de compradores oficiales que NO están en Pivot
-    df_cons_filtrado = df_cons_raw.copy()
-    
-    # Normalizar ID para comparación
-    df_cons_filtrado["id_norm"] = df_cons_filtrado["id"].astype(str).str.strip()
-    
-    # Filtrar: solo oficiales y que no estén en Pivot
-    df_cons_filtrado = df_cons_filtrado[
-        (df_cons_filtrado["id_norm"].notna()) & 
-        (~df_cons_filtrado["id_norm"].isin(ids_en_pivot))
-    ]
-    
-    # Si hay contratos para agregar, procesarlos
-    if not df_cons_filtrado.empty:
-        with st.spinner("✨ Agregando contratos del Consolidado..."):
-            # Crear dataframe con estructura compatible con el Pivot
-            df_agregar = pd.DataFrame()
-            df_agregar["id"] = df_cons_filtrado["id"]
-            df_agregar["proveedor"] = df_cons_filtrado.get("proveedor_cons", "")
-            df_agregar["descripcion"] = df_cons_filtrado.get("descripcion", "")
-            df_agregar["estado_ariba"] = df_cons_filtrado.get("estado_cons_ariba", "Desconocido")
-            df_agregar["fecha_termino"] = df_cons_filtrado.get("fecha_termino_cons", pd.NaT)
-            df_agregar["fecha_inicio"] = pd.NaT  # No disponible en Consolidado
-            df_agregar["tiene_garantia"] = df_cons_filtrado.get("garantia_cons", "").astype(str).str.lower().str.contains("sí|si|yes", na=False)
-            df_agregar["monto_total"] = pd.to_numeric(df_cons_filtrado.get("monto_garantia", 0), errors="coerce").fillna(0)
-            
-            # Determinar comprador canónico (priorizar Estratégico, luego Táctico)
-            if "comprador_estrat" in df_cons_filtrado.columns:
-                df_agregar["propietario_raw"] = df_cons_filtrado["comprador_estrat"].fillna("")
-            elif "comprador_tact" in df_cons_filtrado.columns:
-                df_agregar["propietario_raw"] = df_cons_filtrado["comprador_tact"].fillna("")
-            else:
-                df_agregar["propietario_raw"] = ""
-            
-            # Aplicar funciones de utilidad
-            df_agregar["comprador_canon"] = df_agregar["propietario_raw"].apply(canon)
-            df_agregar["es_oficial"] = df_agregar["comprador_canon"].apply(es_comprador_oficial)
-            df_agregar["tipo_comprador"] = df_agregar["comprador_canon"].apply(tipo_comprador)
-            
-            # Calcular riesgo y campos derivados
-            hoy = pd.Timestamp.today().normalize()
-            df_agregar["dias_venc"] = (df_agregar["fecha_termino"] - hoy).dt.days
-            df_agregar["es_indefinido"] = df_agregar.apply(
-                lambda r: pd.notna(r["fecha_termino"]) and r["fecha_termino"].year > 2100 if pd.notna(r["fecha_termino"]) else False, axis=1)
-            df_agregar["riesgo"] = df_agregar.apply(
-                lambda r: calcular_riesgo(str(r["estado_ariba"]), r["dias_venc"], r["es_indefinido"]), axis=1)
-            df_agregar["region"] = df_cons_filtrado.get("area", "")
-            df_agregar["rut"] = df_cons_filtrado.get("rut", "")
-            
-            # Unir al dataframe principal
-            df = pd.concat([df, df_agregar], ignore_index=True)
-            st.caption(f"✨ +{len(df_agregar)} contratos agregados desde el Consolidado")
-
-# Limpiar valores nulos
-df = df.fillna("")
-
-# ──────────────────────────────────────────────────────────────
-# FILTROS (ahora aplicados sobre el dataframe unificado)
+# FILTROS
 # ──────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -522,24 +458,24 @@ with st.sidebar:
         mostrar_solo_oficiales = st.checkbox("Solo compradores oficiales", value=True,
             help="Filtra contratos cuyo propietario en Ariba es un comprador registrado")
 
-        f_riesgo  = st.selectbox("🚦 Riesgo", ["Todos"] + sorted(df["riesgo"].dropna().unique()))
+        f_riesgo  = st.selectbox("🚦 Riesgo", ["Todos"] + sorted(df_piv["riesgo"].dropna().unique()))
         f_tipo    = st.selectbox("👥 Tipo comprador",
                                   ["Todos","Estratégico","Táctico","Estratégico + Táctico","No registrado"])
 
-        compradores_lista = sorted(df["comprador_canon"].dropna().unique().tolist())
+        compradores_lista = sorted(df_piv["comprador_canon"].dropna().unique().tolist())
         f_comp    = st.selectbox("👤 Comprador", ["Todos"] + compradores_lista)
         f_estado  = st.selectbox("📄 Estado Ariba",
-                                  ["Todos"] + sorted(df["estado_ariba"].dropna().unique()))
+                                  ["Todos"] + sorted(df_piv["estado_ariba"].dropna().unique()))
         f_gar     = st.selectbox("🔒 Garantía", ["Todas","Con garantía","Sin garantía"])
         f_indef   = st.selectbox("♾️ Indefinidos", ["Todos","Solo indefinidos","Solo con fecha"])
 
         st.markdown("---")
-        st.caption(f"📁 {up_pivot.name}\n{len(df_piv):,} contratos en Pivot")
+        st.caption(f"📁 {up_pivot.name}\n{len(df_piv):,} contratos activos")
         if df_cons_raw is not None:
             st.caption(f"📄 {up_cons.name}\n{len(df_cons_raw):,} filas en Consolidado")
-        st.caption(f"🔗 **{len(df):,} contratos totales (unión)**")
 
-# Aplicar filtros sobre el dataframe unificado
+# Aplicar filtros
+df = df_piv.copy()
 if mostrar_solo_oficiales:    df = df[df["es_oficial"]]
 if f_riesgo != "Todos":       df = df[df["riesgo"] == f_riesgo]
 if f_tipo   != "Todos":       df = df[df["tipo_comprador"] == f_tipo]
@@ -967,7 +903,7 @@ with tab_exp:
         df_exp = df_exp[cols_sel]
 
     st.dataframe(df_exp, use_container_width=True, height=500)
-    st.caption(f"Mostrando {len(df_exp):,} de {len(df):,} contratos · {len(df_piv):,} en Pivot + {len(df)-len(df_piv):,} del Consolidado")
+    st.caption(f"Mostrando {len(df_exp):,} de {len(df):,} contratos · {len(df_piv):,} total en Pivot")
 
 # ──────────────────────────────────────────────────────────────
 # EXPORTACIÓN GENERAL
@@ -1007,7 +943,6 @@ with st.expander("🔧 Diagnóstico técnico"):
                  "Riesgo ALTO":int((df["riesgo"]=="ALTO 🔴").sum()),
                  "Riesgo MEDIO":int((df["riesgo"]=="MEDIO 🟡").sum()),
                  "Consolidado cargado":df_cons_raw is not None,
-                 "Contratos del Consolidado agregados": len(df) - len(df_piv),
                  "Actualizado":datetime.now().strftime("%d/%m/%Y %H:%M")})
 
 st.markdown(f"""
