@@ -23,7 +23,7 @@ warnings.filterwarnings("ignore")
 # CONFIGURACIÓN
 # ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Contratos · Softys", page_icon="📋",
-                   layout="wide", initial_sidebar_state="expanded")
+                   layout="wide", initial_bar_state="expanded")
 
 st.markdown("""
 <style>
