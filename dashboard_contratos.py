@@ -37,6 +37,32 @@ section[data-testid="stSidebar"] .stMultiSelect>div>div{
   background:#1a3358 !important;border-color:#2e5490 !important;}
 section[data-testid="stSidebar"] hr{border-color:#2e5490;}
 
+/* ── Botón toggle de la sidebar siempre visible ── */
+button[kind="headerNoPadding"],
+[data-testid="collapsedControl"] {
+    display: flex !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    background: #1a3358 !important;
+    border-radius: 0 8px 8px 0 !important;
+    border: 1px solid #2e5490 !important;
+    border-left: none !important;
+    padding: 6px 4px !important;
+    z-index: 999999 !important;
+}
+[data-testid="collapsedControl"] svg {
+    fill: #e8eef7 !important;
+    color: #e8eef7 !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+}
+[data-testid="collapsedControl"] {
+    position: fixed !important;
+    top: 50% !important;
+    left: 0 !important;
+    transform: translateY(-50%) !important;
+}
+
 .kpi-row{display:grid;grid-template-columns:repeat(5,1fr);gap:11px;margin-bottom:14px;}
 .kpi{background:#fff;border-radius:10px;padding:15px 13px 11px;
      border-left:4px solid #1a56db;box-shadow:0 1px 5px rgba(0,0,0,.07);}
@@ -101,7 +127,6 @@ PIVOT_A_CANON = {
     "denisse andrea gonzalez terrile":     "Denisse Andrea Gonzalez Terrile",
     "bárbara garcía":                      "Bárbara García",
     "claudio berrios":                     "Claudio Berrios",
-    "martina fuentes":                     "Martina Fuentes",
     "martina fuentes":                     "Martina Fuentes",
     "viviana grandón":                     "Viviana Grandón",
     "patricio espinoza":                   "Patricio Espinoza",
@@ -429,7 +454,6 @@ with st.sidebar:
     with filtros_ph.container():
         st.markdown("**🎛️ Filtros**")
 
-        # Solo compradores oficiales o todos
         mostrar_solo_oficiales = st.checkbox("Solo compradores oficiales", value=True,
             help="Filtra contratos cuyo propietario en Ariba es un comprador registrado")
 
@@ -585,7 +609,6 @@ with tab_kpi:
             coloraxis_showscale=False,margin=dict(t=38,b=10,l=8,r=8),height=275)
         st.plotly_chart(fig3, use_container_width=True)
 
-    # Alertas rápidas
     st.markdown('<div class="sec">🚨 Contratos que requieren acción inmediata</div>', unsafe_allow_html=True)
     df_alt = df[df["riesgo"].isin(["ALTO 🔴","MEDIO 🟡"])].copy()
     if not df_alt.empty:
@@ -623,9 +646,8 @@ if tab_sync is not None:
         """, unsafe_allow_html=True)
 
         with st.spinner("🔄 Comparando archivos..."):
-            df_cmp = comparar(df_piv, df_cons_raw)   # comparar sobre TODO el pivot
+            df_cmp = comparar(df_piv, df_cons_raw)
 
-        # ── KPIs de sincronización
         n_ok    = (df_cmp["sync_status"] == "OK").sum()
         n_desact= (df_cmp["sync_status"] == "DESACTUALIZADO").sum()
         n_nuevo = (df_cmp["sync_status"] == "NUEVO").sum()
@@ -648,21 +670,16 @@ if tab_sync is not None:
         </div>
         """, unsafe_allow_html=True)
 
-        # ── ALERTAS POR COMPRADOR ─────────────────────────────
         st.markdown('<div class="sec">🔔 Alertas por comprador — qué debe actualizar cada uno</div>',
                     unsafe_allow_html=True)
 
-        # Solo compradores con problemas
         problemas = df_cmp[df_cmp["sync_status"] != "OK"].copy()
-        # Enriquecer con comprador canon
         problemas["comprador_canon"] = problemas["propietario_raw"].apply(canon) if "propietario_raw" in problemas.columns else "Sin asignar"
-
         compradores_con_prob = sorted(problemas["comprador_canon"].dropna().unique())
 
         if not compradores_con_prob:
             st.success("🎉 ¡El Consolidado está completamente sincronizado con el Pivot de Ariba!")
         else:
-            # Filtro rápido por comprador dentro del módulo
             f_sync_comp = st.selectbox("Ver alertas de:", ["Todos los compradores"] + compradores_con_prob,
                                         key="f_sync_comp")
             df_prob_view = problemas if f_sync_comp == "Todos los compradores" else problemas[problemas["comprador_canon"] == f_sync_comp]
@@ -671,12 +688,12 @@ if tab_sync is not None:
                 grp = df_prob_view[df_prob_view["comprador_canon"] == comp]
                 if grp.empty: continue
 
-                n_grp    = len(grp)
-                n_d      = (grp["sync_status"] == "DESACTUALIZADO").sum()
-                n_n      = (grp["sync_status"] == "NUEVO").sum()
-                n_r      = (grp["sync_status"] == "REVISAR").sum()
-                tipo     = tipo_comprador(comp)
-                es_of    = es_comprador_oficial(comp)
+                n_grp = len(grp)
+                n_d   = (grp["sync_status"] == "DESACTUALIZADO").sum()
+                n_n   = (grp["sync_status"] == "NUEVO").sum()
+                n_r   = (grp["sync_status"] == "REVISAR").sum()
+                tipo  = tipo_comprador(comp)
+                es_of = es_comprador_oficial(comp)
                 badge_tipo = f"<span style='background:#e0f2fe;color:#0369a1;border-radius:6px;padding:1px 7px;font-size:.68rem;margin-left:6px;'>{tipo}</span>" if es_of else "<span style='background:#fef9c3;color:#854d0e;border-radius:6px;padding:1px 7px;font-size:.68rem;margin-left:6px;'>No registrado</span>"
 
                 severity = "red" if n_d > 0 or n_n > 0 else "yellow"
@@ -693,7 +710,6 @@ if tab_sync is not None:
                     </div>
                     """, unsafe_allow_html=True)
 
-                    # Tabla detallada de diferencias
                     cols_det = [c for c in ["id","proveedor","estado_ariba","estado_cons_ariba",
                                              "fecha_termino","fecha_termino_cons",
                                              "sync_status","cambios"] if c in grp.columns]
@@ -714,7 +730,6 @@ if tab_sync is not None:
                         subset=["Estado Sync"] if "Estado Sync" in tbl_det.columns else [])
                     st.dataframe(styled_det, use_container_width=True, height=min(300, 60 + len(grp)*38))
 
-        # ── Gráfico resumen sync por comprador
         st.markdown('<div class="sec">📊 Estado de sincronización por comprador</div>', unsafe_allow_html=True)
         df_cmp["comprador_canon"] = df_cmp["propietario_raw"].apply(canon) if "propietario_raw" in df_cmp.columns else "Sin asignar"
         sc = df_cmp.groupby(["comprador_canon","sync_status"]).size().reset_index(name="n")
@@ -731,7 +746,6 @@ if tab_sync is not None:
             margin=dict(t=10,b=60,l=10,r=10))
         st.plotly_chart(fig_sc, use_container_width=True)
 
-        # ── Exportación
         st.markdown('<div class="sec">📥 Exportar reporte de sincronización</div>', unsafe_allow_html=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M")
         cols_exp = [c for c in ["id","proveedor","comprador_canon","estado_ariba","estado_cons_ariba",
