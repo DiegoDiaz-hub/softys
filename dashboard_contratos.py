@@ -427,7 +427,7 @@ if not up_pivot:
     st.stop()
 
 # ──────────────────────────────────────────────────────────────
-# CARGA DE DATOS
+# CARGA DE DATOS (MODIFICADO PARA UNIR AMBOS ARCHIVOS)
 # ──────────────────────────────────────────────────────────────
 
 up_pivot.seek(0); piv_bytes = up_pivot.read()
@@ -446,6 +446,40 @@ if up_cons:
         except Exception as e:
             st.warning(f"⚠️ No se pudo leer el Consolidado: {e}")
 
+# --- AQUÍ ESTÁ LA SOLUCIÓN: UNIR PIVOT Y CONSOLIDADO ---
+if df_cons_raw is not None and not df_cons_raw.empty:
+    with st.spinner("🔄 Sincronizando archivos (Unión completa)..."):
+        # 1. Asegurar que el ID sea string y limpio en ambos
+        df_piv['id'] = df_piv['id'].astype(str).str.strip()
+        df_cons_raw['id'] = df_cons_raw['id'].astype(str).str.strip()
+        
+        # 2. Merge 'outer': Mantiene TODO lo del Pivot Y TODO lo del Consolidado
+        df_merged = pd.merge(df_piv, df_cons_raw, on='id', how='outer', suffixes=('_pivot', '_consol'))
+        
+        # 3. Lógica de prioridad: El Pivot es la fuente de la verdad.
+        # Si falta un dato en el Pivot, rellenamos con el del Consolidado.
+        for col in df_piv.columns:
+            if col != 'id' and col in df_merged.columns:
+                col_pivot = col
+                col_consol = col + '_consol'
+                if col_consol in df_merged.columns:
+                    # combine_first toma el valor de la izquierda (Pivot) si existe, sino el de la derecha
+                    df_merged[col] = df_merged[col].combine_first(df_merged[col_consol])
+        
+        # 4. Limpiar columnas duplicadas (_consol) para no ensuciar el dataframe final
+        cols_to_drop = [c for c in df_merged.columns if c.endswith('_consol')]
+        df = df_merged.drop(columns=cols_to_drop)
+        
+        # Opcional: Columna para saber de dónde viene (ayuda a depurar)
+        df['origen'] = df.apply(lambda r: 'Pivot' if pd.notna(r.get('estado_ariba')) else 'Solo Consolidado', axis=1)
+
+else:
+    # Si no hay consolidado, usamos solo el pivot
+    df = df_piv.copy()
+
+# Limpiar vacíos
+df = df.fillna("")
+
 # ──────────────────────────────────────────────────────────────
 # FILTROS
 # ──────────────────────────────────────────────────────────────
@@ -457,24 +491,25 @@ with st.sidebar:
         mostrar_solo_oficiales = st.checkbox("Solo compradores oficiales", value=True,
             help="Filtra contratos cuyo propietario en Ariba es un comprador registrado")
 
-        f_riesgo  = st.selectbox("🚦 Riesgo", ["Todos"] + sorted(df_piv["riesgo"].dropna().unique()))
+        # NOTA: Ahora los filtros se aplican sobre 'df' que contiene la UNIÓN de ambos
+        f_riesgo  = st.selectbox("🚦 Riesgo", ["Todos"] + sorted(df["riesgo"].dropna().unique()))
         f_tipo    = st.selectbox("👥 Tipo comprador",
                                   ["Todos","Estratégico","Táctico","Estratégico + Táctico","No registrado"])
 
-        compradores_lista = sorted(df_piv["comprador_canon"].dropna().unique().tolist())
+        compradores_lista = sorted(df["comprador_canon"].dropna().unique().tolist())
         f_comp    = st.selectbox("👤 Comprador", ["Todos"] + compradores_lista)
         f_estado  = st.selectbox("📄 Estado Ariba",
-                                  ["Todos"] + sorted(df_piv["estado_ariba"].dropna().unique()))
+                                  ["Todos"] + sorted(df["estado_ariba"].dropna().unique()))
         f_gar     = st.selectbox("🔒 Garantía", ["Todas","Con garantía","Sin garantía"])
         f_indef   = st.selectbox("♾️ Indefinidos", ["Todos","Solo indefinidos","Solo con fecha"])
 
         st.markdown("---")
-        st.caption(f"📁 {up_pivot.name}\n{len(df_piv):,} contratos activos")
+        st.caption(f"📁 {up_pivot.name}\n{len(df_piv):,} contratos activos en Pivot")
         if df_cons_raw is not None:
             st.caption(f"📄 {up_cons.name}\n{len(df_cons_raw):,} filas en Consolidado")
+        st.caption(f"🔗 **{len(df):,} contratos totales (Unión)**")
 
-# Aplicar filtros
-df = df_piv.copy()
+# Aplicar filtros sobre el DataFrame unificado 'df'
 if mostrar_solo_oficiales:    df = df[df["es_oficial"]]
 if f_riesgo != "Todos":       df = df[df["riesgo"] == f_riesgo]
 if f_tipo   != "Todos":       df = df[df["tipo_comprador"] == f_tipo]
