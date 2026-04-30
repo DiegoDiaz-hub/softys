@@ -384,7 +384,7 @@ def construir_universo(df_p: pd.DataFrame, df_c: pd.DataFrame | None) -> pd.Data
 
 
 # ──────────────────────────────────────────────────────────────
-# MOTOR DE COMPARACIÓN (con detección de cambio de comprador)
+# MOTOR DE COMPARACIÓN (CORREGIDO: prioridad correcta de estados)
 # ──────────────────────────────────────────────────────────────
 
 def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
@@ -396,7 +396,7 @@ def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
     merged["es_nuevo_ariba"]    = merged["_merge"] == "left_only"   # en Ariba, no en Consolidado
     merged["es_solo_cons"]      = merged["_merge"] == "right_only"  # en Consolidado, no en Ariba
 
-    # ── NUEVO: Detectar diferencia en comprador asignado ──
+    # ── Detectar diferencia en comprador asignado ──
     def _dif_comprador(r):
         if r["es_nuevo_ariba"] or r["es_solo_cons"]:
             return False
@@ -427,14 +427,25 @@ def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
         lambda r: not r["es_nuevo_ariba"] and not r["es_solo_cons"] and
                   norm(r.get("garantia_ariba","")) != norm(r.get("garantia_cons","")), axis=1)
 
+    # ── CORRECCIÓN: Prioridad correcta de estados ──
     def _status(r):
+        # 1. Prioridad máxima: contratos que solo existen en una fuente
         if r["es_solo_cons"]:                        return "SOLO CONSOLIDADO"
         if r["es_nuevo_ariba"]:                      return "NUEVO EN ARIBA"
-        if r["dif_comprador"]:                       return "CAMBIO DE COMPRADOR"  # ← NUEVO
+        
+        # 2. Prioridad alta: diferencias críticas (estado o fecha) ← ESTO ES LO MÁS IMPORTANTE
         if r["dif_estado"] or r["dif_fecha"]:        return "DESACTUALIZADO"
+        
+        # 3. Prioridad media: cambio de comprador (solo si NO hay diferencias críticas)
+        if r["dif_comprador"]:                       return "CAMBIO DE COMPRADOR"
+        
+        # 4. Prioridad baja: diferencias menores (proveedor/garantía)
         if r["dif_proveedor"] or r["dif_garantia"]:  return "REVISAR"
+        
+        # 5. Todo OK
         return "OK"
     merged["sync_status"] = merged.apply(_status, axis=1)
+    # ───────────────────────────────────────────────────────
 
     def _cambios(r):
         if r["es_solo_cons"]:
@@ -442,7 +453,7 @@ def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
             return f"📂 Contrato registrado solo en el Consolidado (comprador: {comp}) — verificar si debe subirse a Ariba"
         if r["es_nuevo_ariba"]:
             return "🆕 Contrato nuevo en Ariba — no existe en el Consolidado"
-        if r["dif_comprador"]:  # ← NUEVO
+        if r["dif_comprador"]:
             comp_pivot = r.get("propietario_raw","—")
             comp_cons = r.get("comprador_estrat", r.get("comprador_tact","—"))
             return f"👤 Cambio de comprador: Pivot=«{comp_pivot}» / Consolidado=«{comp_cons}»"
@@ -472,7 +483,7 @@ def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
             if ce and ce.lower() not in ("nan",""):  return canon(ce)
             if ct and ct.lower() not in ("nan",""):  return canon(ct)
             return "Sin asignar"
-        # ← NUEVO: Si hay diferencia de comprador, usar el del Consolidado (asignación manual más reciente)
+        # Si hay diferencia de comprador, usar el del Consolidado (asignación manual más reciente)
         if r.get("dif_comprador"):
             ce = str(r.get("comprador_estrat","")).strip()
             ct = str(r.get("comprador_tact","")).strip()
