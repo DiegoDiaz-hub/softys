@@ -1,9 +1,12 @@
-
 """
 dashboard_pivot.py — Softys Chile · Compras Estratégicas
 =========================================================
 Sube el Pivot (Ariba) + Consolidado (Drive) y el sistema detecta
 automáticamente qué datos están desactualizados y quién debe actualizarlos.
+
+ACTUALIZACIÓN: El Consolidado ahora es fuente válida junto al Pivot.
+Los contratos que existen solo en el Consolidado se muestran marcados
+como "Solo Consolidado" y se incluyen en la vista de cada comprador.
 
 Instalar:  pip install streamlit pandas plotly openpyxl
 Ejecutar:  streamlit run dashboard_pivot.py
@@ -38,7 +41,6 @@ section[data-testid="stSidebar"] .stMultiSelect>div>div{
   background:#1a3358 !important;border-color:#2e5490 !important;}
 section[data-testid="stSidebar"] hr{border-color:#2e5490;}
 
-/* ── Botón toggle de la sidebar siempre visible ── */
 button[kind="headerNoPadding"],
 [data-testid="collapsedControl"] {
     display: flex !important;
@@ -70,6 +72,7 @@ button[kind="headerNoPadding"],
 .kpi.g{border-left-color:#059669;} .kpi.r{border-left-color:#dc2626;}
 .kpi.y{border-left-color:#d97706;} .kpi.gr{border-left-color:#6b7280;}
 .kpi.b{border-left-color:#2563eb;} .kpi.o{border-left-color:#ea580c;}
+.kpi.p{border-left-color:#7c3aed;}
 .kpi-lbl{font-size:.67rem;text-transform:uppercase;letter-spacing:.07em;color:#6b7280;font-weight:600;}
 .kpi-val{font-size:1.85rem;font-weight:700;color:#0d1f3c;line-height:1.05;}
 .kpi-sub{font-size:.69rem;color:#9ca3af;margin-top:2px;}
@@ -79,46 +82,39 @@ button[kind="headerNoPadding"],
 .alert-card.yellow{background:#fffbeb;border-left:4px solid #d97706;}
 .alert-card.blue  {background:#eff6ff;border-left:4px solid #2563eb;}
 .alert-card.green {background:#f0fdf4;border-left:4px solid #059669;}
+.alert-card.purple{background:#f5f3ff;border-left:4px solid #7c3aed;}
 .sec{font-size:.93rem;font-weight:700;color:#0d1f3c;border-bottom:2px solid #e5e7eb;
      padding-bottom:5px;margin:20px 0 11px;}
+
+/* Badges de fuente */
+.badge-ariba{background:#dbeafe;color:#1e40af;border-radius:99px;padding:1px 8px;font-size:.67rem;font-weight:700;}
+.badge-cons{background:#f5f3ff;color:#6d28d9;border-radius:99px;padding:1px 8px;font-size:.67rem;font-weight:700;}
+.badge-ambos{background:#d1fae5;color:#065f46;border-radius:99px;padding:1px 8px;font-size:.67rem;font-weight:700;}
+
 #MainMenu,footer,header{visibility:hidden;}
 .block-container{padding-top:1.3rem;}
 </style>
 """, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────
-# LISTAS OFICIALES DE COMPRADORES (según imágenes)
+# LISTAS OFICIALES DE COMPRADORES
 # ──────────────────────────────────────────────────────────────
 
-# Estratégicos (imágenes 1 y 2)
 ESTRATEGICOS = {
-    "Bárbara García",
-    "BPO",
-    "Claudio Berrios",
-    "Denisse Andrea Gonzalez Terrile",
-    "Jorge Alfonso Urrutia Carillo",
-    "Jorge Urrutia",
-    "Joseph España",
-    "Juan Daniel Figueroa",
-    "Juan Figueroa",
-    "Magdalena Farias",
-    "Martina Fuentes",
-    "Patricio Espinoza",
-    "Viviana Grandón",
+    "Bárbara García", "BPO", "Claudio Berrios",
+    "Denisse Andrea Gonzalez Terrile", "Jorge Alfonso Urrutia Carillo",
+    "Jorge Urrutia", "Joseph España", "Juan Daniel Figueroa",
+    "Juan Figueroa", "Magdalena Farias", "Martina Fuentes",
+    "Patricio Espinoza", "Viviana Grandón",
 }
 
-# Tácticos (imagen 3)
 TACTICOS = {
-    "BPO",
-    "Dayana Dávila",
-    "Joseph España",
-    "Leonardo Nacarate",
-    "Patricio Espinoza",
+    "BPO", "Dayana Dávila", "Joseph España",
+    "Leonardo Nacarate", "Patricio Espinoza",
 }
 
 TODOS_COMPRADORES = ESTRATEGICOS | TACTICOS
 
-# Mapa: nombre en Pivot → nombre canónico oficial
 PIVOT_A_CANON = {
     "jorge alfonso urrutia carillo":       "Jorge Urrutia",
     "juan daniel figueroa":                "Juan Figueroa",
@@ -134,7 +130,6 @@ PIVOT_A_CANON = {
     "leandro medina":                      "Leonardo Nacarate",
     "leonardo nacarate":                   "Leonardo Nacarate",
     "dayana davila":                       "Dayana Dávila",
-    # Los que aparecen en Pivot pero NO son compradores oficiales → se dejan como están
 }
 
 # ──────────────────────────────────────────────────────────────
@@ -183,7 +178,6 @@ def norm(v) -> str:
     return str(v).strip().lower() if pd.notna(v) and str(v).strip() not in ("", "nan") else ""
 
 def canon(raw: str) -> str:
-    """Convierte nombre del Pivot al nombre canónico oficial."""
     k = norm(raw)
     return PIVOT_A_CANON.get(k, str(raw).strip() if k else "Sin asignar")
 
@@ -236,9 +230,12 @@ def fmt_m(v: float) -> str:
     return f"${v:.0f}"
 
 COL_RIESGO = {"BAJO 🟢":"#059669","MEDIO 🟡":"#d97706","ALTO 🔴":"#dc2626","REVISAR ⚪":"#6b7280"}
-COL_SYNC   = {"OK":"#059669","DESACTUALIZADO":"#dc2626","NUEVO":"#2563eb","REVISAR":"#d97706"}
-BG_SYNC    = {"OK":"#f0fdf4","DESACTUALIZADO":"#fef2f2","NUEVO":"#eff6ff","REVISAR":"#fffbeb"}
-FG_SYNC    = {"OK":"#065f46","DESACTUALIZADO":"#991b1b","NUEVO":"#1e40af","REVISAR":"#92400e"}
+COL_SYNC   = {"OK":"#059669","DESACTUALIZADO":"#dc2626","NUEVO EN ARIBA":"#2563eb",
+               "SOLO CONSOLIDADO":"#7c3aed","REVISAR":"#d97706"}
+BG_SYNC    = {"OK":"#f0fdf4","DESACTUALIZADO":"#fef2f2","NUEVO EN ARIBA":"#eff6ff",
+               "SOLO CONSOLIDADO":"#f5f3ff","REVISAR":"#fffbeb"}
+FG_SYNC    = {"OK":"#065f46","DESACTUALIZADO":"#991b1b","NUEVO EN ARIBA":"#1e40af",
+               "SOLO CONSOLIDADO":"#6d28d9","REVISAR":"#92400e"}
 
 # ──────────────────────────────────────────────────────────────
 # CARGA Y TRANSFORMACIÓN
@@ -265,7 +262,6 @@ def cargar_pivot(fhash: str, content: bytes) -> pd.DataFrame:
         if rw in df.columns:
             df[pr] = df[rw].apply(parse_fecha)
 
-    # Nombre canónico del propietario
     df["comprador_canon"] = df["propietario_raw"].apply(canon) if "propietario_raw" in df.columns else "Sin asignar"
     df["es_oficial"]      = df["comprador_canon"].apply(es_comprador_oficial)
     df["tipo_comprador"]  = df["comprador_canon"].apply(tipo_comprador)
@@ -289,6 +285,7 @@ def cargar_pivot(fhash: str, content: bytes) -> pd.DataFrame:
     if "fecha_inicio" in df.columns:
         df["anio_inicio"] = df["fecha_inicio"].dt.year
 
+    df["fuente"] = "Ariba"
     return df[df["id"].notna() & (df["id"] != "nan") & (df["id"] != "")].reset_index(drop=True)
 
 
@@ -309,21 +306,98 @@ def cargar_consolidado(fhash: str, content: bytes) -> pd.DataFrame:
 
 
 # ──────────────────────────────────────────────────────────────
-# MOTOR DE COMPARACIÓN
+# UNIVERSO UNIFICADO: FULL OUTER JOIN Pivot + Consolidado
+# ──────────────────────────────────────────────────────────────
+
+def construir_universo(df_p: pd.DataFrame, df_c: pd.DataFrame | None) -> pd.DataFrame:
+    """
+    Combina Pivot y Consolidado en un único DataFrame.
+    - Contratos en ambos  → fuente = "Ambos"
+    - Solo en Pivot       → fuente = "Ariba"
+    - Solo en Consolidado → fuente = "Solo Consolidado"
+    El campo comprador_canon se construye priorizando el Consolidado
+    (comprador_estrat / comprador_tact) cuando el contrato no está en Ariba.
+    """
+    if df_c is None:
+        return df_p.copy()
+
+    ids_ariba = set(df_p["id"].astype(str))
+    ids_cons  = set(df_c["id"].astype(str))
+
+    # ── Paso 1: contratos que están en ambos ──
+    df_merged = df_p.merge(df_c, on="id", how="left", suffixes=("","_c"))
+    df_merged.loc[df_merged["id"].isin(ids_cons), "fuente"] = "Ambos"
+
+    # ── Paso 2: contratos SOLO en el Consolidado ──
+    ids_solo_cons = ids_cons - ids_ariba
+    if ids_solo_cons:
+        df_solo = df_c[df_c["id"].isin(ids_solo_cons)].copy()
+
+        # Construir campos mínimos para que funcionen los filtros y KPIs
+        df_solo["fuente"]       = "Solo Consolidado"
+        df_solo["estado_ariba"] = df_solo.get("estado_cons_ariba", pd.Series(dtype=str))
+        df_solo["proveedor"]    = df_solo.get("proveedor_cons",     pd.Series(dtype=str))
+        df_solo["fecha_termino"]= df_solo.get("fecha_termino_cons", pd.Series(dtype="datetime64[ns]"))
+        df_solo["tiene_garantia"] = df_solo.get("garantia_cons", pd.Series(dtype=str)).apply(
+            lambda v: norm(v) in ("sí","si","yes","aplica","true"))
+        df_solo["indefinido_raw"] = df_solo.get("indefinido_cons", pd.Series(dtype=str))
+        df_solo["monto_total"]  = pd.to_numeric(
+            df_solo.get("monto_garantia", pd.Series(dtype=float)), errors="coerce").fillna(0)
+
+        hoy = pd.Timestamp.today().normalize()
+        df_solo["dias_venc"] = (df_solo["fecha_termino"] - hoy).dt.days
+
+        def _indef_cons(row):
+            if norm(row.get("indefinido_raw","")) in ("sí","si","yes","1","true","indefinido","x"):
+                return True
+            ft = row.get("fecha_termino")
+            return pd.notna(ft) and isinstance(ft, pd.Timestamp) and ft.year > 2100
+        df_solo["es_indefinido"] = df_solo.apply(_indef_cons, axis=1)
+
+        df_solo["riesgo"] = df_solo.apply(lambda r: calcular_riesgo(
+            str(r.get("estado_ariba","")), r.get("dias_venc"), r.get("es_indefinido",False)), axis=1)
+
+        # Comprador: usar estrat > tact > "Sin asignar"
+        def _comp_cons(row):
+            ce = str(row.get("comprador_estrat","")).strip()
+            ct = str(row.get("comprador_tact","")).strip()
+            if ce and ce.lower() not in ("nan",""):
+                return canon(ce)
+            if ct and ct.lower() not in ("nan",""):
+                return canon(ct)
+            return "Sin asignar"
+
+        df_solo["comprador_canon"] = df_solo.apply(_comp_cons, axis=1)
+        df_solo["es_oficial"]      = df_solo["comprador_canon"].apply(es_comprador_oficial)
+        df_solo["tipo_comprador"]  = df_solo["comprador_canon"].apply(tipo_comprador)
+        df_solo["propietario_raw"] = df_solo["comprador_canon"]  # para compatibilidad
+
+        # Unir al merged (alineando solo columnas existentes)
+        cols_comunes = [c for c in df_merged.columns if c in df_solo.columns]
+        df_merged = pd.concat([df_merged, df_solo[cols_comunes]], ignore_index=True)
+
+    return df_merged.reset_index(drop=True)
+
+
+# ──────────────────────────────────────────────────────────────
+# MOTOR DE COMPARACIÓN (ahora también detecta "Solo Consolidado")
 # ──────────────────────────────────────────────────────────────
 
 def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
-    ids_cons = set(df_c["id"].astype(str))
-    merged = df_p.merge(df_c, on="id", how="left", suffixes=("","_c"))
+    ids_cons  = set(df_c["id"].astype(str))
+    ids_ariba = set(df_p["id"].astype(str))
 
-    merged["es_nuevo"] = ~merged["id"].isin(ids_cons)
+    merged = df_p.merge(df_c, on="id", how="outer", suffixes=("","_c"), indicator=True)
+
+    merged["es_nuevo_ariba"]    = merged["_merge"] == "left_only"   # en Ariba, no en Consolidado
+    merged["es_solo_cons"]      = merged["_merge"] == "right_only"  # en Consolidado, no en Ariba
 
     merged["dif_estado"] = merged.apply(
-        lambda r: not r["es_nuevo"] and
+        lambda r: not r["es_nuevo_ariba"] and not r["es_solo_cons"] and
                   norm(r.get("estado_ariba","")) != norm(r.get("estado_cons_ariba","")), axis=1)
 
     def _dif_fecha(r):
-        if r["es_nuevo"]: return False
+        if r["es_nuevo_ariba"] or r["es_solo_cons"]: return False
         fp, fc = r.get("fecha_termino"), r.get("fecha_termino_cons")
         if pd.isna(fp) or pd.isna(fc): return False
         if not (isinstance(fp, pd.Timestamp) and isinstance(fc, pd.Timestamp)): return False
@@ -331,22 +405,26 @@ def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
     merged["dif_fecha"] = merged.apply(_dif_fecha, axis=1)
 
     merged["dif_proveedor"] = merged.apply(
-        lambda r: not r["es_nuevo"] and
+        lambda r: not r["es_nuevo_ariba"] and not r["es_solo_cons"] and
                   norm(r.get("proveedor","")) != norm(r.get("proveedor_cons","")), axis=1)
 
     merged["dif_garantia"] = merged.apply(
-        lambda r: not r["es_nuevo"] and
+        lambda r: not r["es_nuevo_ariba"] and not r["es_solo_cons"] and
                   norm(r.get("garantia_ariba","")) != norm(r.get("garantia_cons","")), axis=1)
 
     def _status(r):
-        if r["es_nuevo"]:                        return "NUEVO"
-        if r["dif_estado"] or r["dif_fecha"]:    return "DESACTUALIZADO"
-        if r["dif_proveedor"] or r["dif_garantia"]: return "REVISAR"
+        if r["es_solo_cons"]:                        return "SOLO CONSOLIDADO"
+        if r["es_nuevo_ariba"]:                      return "NUEVO EN ARIBA"
+        if r["dif_estado"] or r["dif_fecha"]:        return "DESACTUALIZADO"
+        if r["dif_proveedor"] or r["dif_garantia"]:  return "REVISAR"
         return "OK"
     merged["sync_status"] = merged.apply(_status, axis=1)
 
     def _cambios(r):
-        if r["es_nuevo"]:
+        if r["es_solo_cons"]:
+            comp = r.get("comprador_estrat","") or r.get("comprador_tact","") or "—"
+            return f"📂 Contrato registrado solo en el Consolidado (comprador: {comp}) — verificar si debe subirse a Ariba"
+        if r["es_nuevo_ariba"]:
             return "🆕 Contrato nuevo en Ariba — no existe en el Consolidado"
         msgs = []
         if r["dif_estado"]:
@@ -365,6 +443,18 @@ def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
             msgs.append(f"🔒 Garantía: Ariba=«{r.get('garantia_ariba','—')}» / Consolidado=«{r.get('garantia_cons','—')}»")
         return " | ".join(msgs) if msgs else "✅ Sincronizado"
     merged["cambios"] = merged.apply(_cambios, axis=1)
+
+    # Reparar comprador_canon en filas "solo consolidado"
+    def _comp_merged(r):
+        if r.get("es_solo_cons"):
+            ce = str(r.get("comprador_estrat","")).strip()
+            ct = str(r.get("comprador_tact","")).strip()
+            if ce and ce.lower() not in ("nan",""):  return canon(ce)
+            if ct and ct.lower() not in ("nan",""):  return canon(ct)
+            return "Sin asignar"
+        raw = r.get("propietario_raw","")
+        return canon(raw) if raw else "Sin asignar"
+    merged["comprador_canon"] = merged.apply(_comp_merged, axis=1)
 
     return merged
 
@@ -407,9 +497,9 @@ if not up_pivot:
       <p style="color:#6b7280;max-width:480px;line-height:1.6;margin-bottom:26px;">
         Sube el <strong>Pivot de Ariba</strong> para ver indicadores.<br>
         Agrega el <strong>Consolidado del Drive</strong> para detectar qué está desactualizado
-        y quién debe actualizarlo.
+        y quién debe actualizarlo — incluyendo contratos gestionados directamente en el Consolidado.
       </p>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;max-width:580px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:14px;max-width:720px;">
         <div style="background:#f0fdf4;border-radius:10px;padding:13px;border:1px solid #d1fae5;">
           <div style="font-size:1.3rem">📊</div>
           <div style="font-weight:600;font-size:.8rem;margin-top:5px;">10 KPIs automáticos</div>
@@ -417,6 +507,10 @@ if not up_pivot:
         <div style="background:#eff6ff;border-radius:10px;padding:13px;border:1px solid #dbeafe;">
           <div style="font-size:1.3rem">🔄</div>
           <div style="font-weight:600;font-size:.8rem;margin-top:5px;">Sincronización campo a campo</div>
+        </div>
+        <div style="background:#f5f3ff;border-radius:10px;padding:13px;border:1px solid #e9d5ff;">
+          <div style="font-size:1.3rem">📂</div>
+          <div style="font-weight:600;font-size:.8rem;margin-top:5px;">Contratos solo en Drive</div>
         </div>
         <div style="background:#fefce8;border-radius:10px;padding:13px;border:1px solid #fde68a;">
           <div style="font-size:1.3rem">👤</div>
@@ -447,8 +541,12 @@ if up_cons:
         except Exception as e:
             st.warning(f"⚠️ No se pudo leer el Consolidado: {e}")
 
+# ── Universo unificado ──
+with st.spinner("🔗 Unificando fuentes..."):
+    df_universo = construir_universo(df_piv, df_cons_raw)
+
 # ──────────────────────────────────────────────────────────────
-# FILTROS
+# FILTROS  (sobre el universo unificado)
 # ──────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -456,27 +554,33 @@ with st.sidebar:
         st.markdown("**🎛️ Filtros**")
 
         mostrar_solo_oficiales = st.checkbox("Solo compradores oficiales", value=True,
-            help="Filtra contratos cuyo propietario en Ariba es un comprador registrado")
+            help="Filtra contratos cuyo propietario es un comprador registrado")
 
-        f_riesgo  = st.selectbox("🚦 Riesgo", ["Todos"] + sorted(df_piv["riesgo"].dropna().unique()))
+        # Fuente: nuevo filtro
+        f_fuente = st.selectbox("📂 Fuente", ["Todas","Ariba","Ambos","Solo Consolidado"])
+
+        f_riesgo  = st.selectbox("🚦 Riesgo", ["Todos"] + sorted(df_universo["riesgo"].dropna().unique()))
         f_tipo    = st.selectbox("👥 Tipo comprador",
                                   ["Todos","Estratégico","Táctico","Estratégico + Táctico","No registrado"])
 
-        compradores_lista = sorted(df_piv["comprador_canon"].dropna().unique().tolist())
+        compradores_lista = sorted(df_universo["comprador_canon"].dropna().unique().tolist())
         f_comp    = st.selectbox("👤 Comprador", ["Todos"] + compradores_lista)
         f_estado  = st.selectbox("📄 Estado Ariba",
-                                  ["Todos"] + sorted(df_piv["estado_ariba"].dropna().unique()))
+                                  ["Todos"] + sorted(df_universo["estado_ariba"].dropna().unique()))
         f_gar     = st.selectbox("🔒 Garantía", ["Todas","Con garantía","Sin garantía"])
         f_indef   = st.selectbox("♾️ Indefinidos", ["Todos","Solo indefinidos","Solo con fecha"])
 
         st.markdown("---")
-        st.caption(f"📁 {up_pivot.name}\n{len(df_piv):,} contratos activos")
+        n_ariba = (df_universo["fuente"] == "Ariba").sum() + (df_universo["fuente"] == "Ambos").sum()
+        n_solo_cons = (df_universo["fuente"] == "Solo Consolidado").sum()
+        st.caption(f"📁 {up_pivot.name}\n{len(df_piv):,} contratos activos en Ariba")
         if df_cons_raw is not None:
-            st.caption(f"📄 {up_cons.name}\n{len(df_cons_raw):,} filas en Consolidado")
+            st.caption(f"📄 {up_cons.name}\n{len(df_cons_raw):,} filas · {n_solo_cons:,} solo en Drive")
 
 # Aplicar filtros
-df = df_piv.copy()
+df = df_universo.copy()
 if mostrar_solo_oficiales:    df = df[df["es_oficial"]]
+if f_fuente != "Todas":       df = df[df["fuente"] == f_fuente]
 if f_riesgo != "Todos":       df = df[df["riesgo"] == f_riesgo]
 if f_tipo   != "Todos":       df = df[df["tipo_comprador"] == f_tipo]
 if f_comp   != "Todos":       df = df[df["comprador_canon"] == f_comp]
@@ -493,18 +597,21 @@ if df.empty:
 # ENCABEZADO
 # ──────────────────────────────────────────────────────────────
 
-sync_pill = ""
+n_solo_cons_vis = (df["fuente"] == "Solo Consolidado").sum()
+pills = []
 if df_cons_raw is not None:
-    sync_pill = '<span style="background:#dbeafe;color:#1e40af;border-radius:99px;padding:2px 10px;font-size:.7rem;font-weight:700;margin-left:10px;">🔄 Sincronización activa</span>'
+    pills.append('<span style="background:#dbeafe;color:#1e40af;border-radius:99px;padding:2px 10px;font-size:.7rem;font-weight:700;margin-left:8px;">🔄 Sincronización activa</span>')
+if n_solo_cons_vis > 0:
+    pills.append(f'<span style="background:#f5f3ff;color:#6d28d9;border-radius:99px;padding:2px 10px;font-size:.7rem;font-weight:700;margin-left:4px;">📂 {n_solo_cons_vis} solo en Drive</span>')
 
 st.markdown(f"""
 <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:5px;">
   <div>
     <h1 style="font-size:1.4rem;font-weight:700;color:#0d1f3c;margin:0;line-height:1.2;">
-      Dashboard de Gestión de Contratos{sync_pill}
+      Dashboard de Gestión de Contratos{''.join(pills)}
     </h1>
     <div style="color:#6b7280;font-size:.77rem;margin-top:2px;">
-      Softys Chile · Fuente: SAP Ariba · {df["id"].nunique():,} contratos activos en vista
+      Softys Chile · Fuentes: SAP Ariba + Consolidado Drive · {df["id"].nunique():,} contratos en vista
     </div>
   </div>
   <div style="font-size:.7rem;color:#9ca3af;">{datetime.now().strftime('%d/%m/%Y %H:%M')}</div>
@@ -538,11 +645,12 @@ with tab_kpi:
     gar     = df["tiene_garantia"].sum()
     monto   = df["monto_total"].sum() if "monto_total" in df.columns else 0
     pct_v   = f"{bajo/total*100:.0f}%" if total else "—"
+    n_sc    = (df["fuente"] == "Solo Consolidado").sum()
 
     st.markdown(f"""
     <div class="kpi-row">
       <div class="kpi"><div class="kpi-lbl">📋 Total contratos</div>
-        <div class="kpi-val">{total:,}</div><div class="kpi-sub">activos (sin cerrados)</div></div>
+        <div class="kpi-val">{total:,}</div><div class="kpi-sub">Ariba + Drive unificados</div></div>
       <div class="kpi g"><div class="kpi-lbl">✅ Vigentes</div>
         <div class="kpi-val">{bajo:,}</div><div class="kpi-sub">{pct_v} del total</div></div>
       <div class="kpi y"><div class="kpi-lbl">⚠️ Riesgo medio</div>
@@ -553,19 +661,29 @@ with tab_kpi:
         <div class="kpi-val">{revisar:,}</div><div class="kpi-sub">borrador / sin fecha</div></div>
     </div>
     <div class="kpi-row">
+      <div class="kpi p"><div class="kpi-lbl">📂 Solo en Drive</div>
+        <div class="kpi-val">{n_sc:,}</div><div class="kpi-sub">no están en Ariba</div></div>
       <div class="kpi"><div class="kpi-lbl">♾️ Indefinidos</div>
         <div class="kpi-val">{indef:,}</div><div class="kpi-sub">sin fecha de término</div></div>
       <div class="kpi g"><div class="kpi-lbl">🔒 Con garantía</div>
-        <div class="kpi-val">{gar:,}</div><div class="kpi-sub">aplica boleta Ariba</div></div>
-      <div class="kpi"><div class="kpi-lbl">💰 Monto total</div>
-        <div class="kpi-val">{fmt_m(monto)}</div><div class="kpi-sub">CLP contratos filtrados</div></div>
+        <div class="kpi-val">{gar:,}</div><div class="kpi-sub">aplica boleta</div></div>
       <div class="kpi"><div class="kpi-lbl">👤 Compradores</div>
         <div class="kpi-val">{df["comprador_canon"].nunique():,}</div><div class="kpi-sub">propietarios únicos</div></div>
-      <div class="kpi"><div class="kpi-lbl">🏢 Proveedores</div>
-        <div class="kpi-val">{df["proveedor"].nunique() if "proveedor" in df.columns else 0:,}</div>
-        <div class="kpi-sub">proveedores únicos</div></div>
+      <div class="kpi"><div class="kpi-lbl">💰 Monto total</div>
+        <div class="kpi-val">{fmt_m(monto)}</div><div class="kpi-sub">CLP contratos filtrados</div></div>
     </div>
     """, unsafe_allow_html=True)
+
+    # Banner informativo si hay contratos solo en Drive
+    if n_sc > 0:
+        st.markdown(f"""
+        <div class="alert-card purple">
+          <strong>📂 {n_sc} contratos registrados solo en el Consolidado del Drive</strong><br>
+          Estos contratos son gestionados directamente por los compradores en el Consolidado
+          y <em>no tienen correspondencia en Ariba</em>. Están incluidos en todos los KPIs y filtros.
+          Considera si deben ser subidos a SAP Ariba.
+        </div>
+        """, unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns([1, 1.4, 1.2])
     with c1:
@@ -600,28 +718,31 @@ with tab_kpi:
                 st.plotly_chart(fig2, use_container_width=True)
 
     with c3:
-        d3 = df["estado_ariba"].value_counts().reset_index(); d3.columns = ["e","n"]
-        fig3 = px.bar(d3, x="n", y="e", orientation="h", title="Por estado Ariba",
-            color="n", color_continuous_scale="Blues", labels={"n":"","e":""})
-        fig3.update_layout(paper_bgcolor="white",plot_bgcolor="white",
-            font=dict(family="DM Sans",size=10),
-            title=dict(font=dict(size=13,color="#0d1f3c")),
-            yaxis=dict(categoryorder="total ascending",tickfont=dict(size=9)),
-            coloraxis_showscale=False,margin=dict(t=38,b=10,l=8,r=8),height=275)
-        st.plotly_chart(fig3, use_container_width=True)
+        # Gráfico de fuente
+        d_fuente = df["fuente"].value_counts().reset_index(); d_fuente.columns = ["f","n"]
+        col_fuente = {"Ariba":"#2563eb","Ambos":"#059669","Solo Consolidado":"#7c3aed"}
+        fig_f = go.Figure(go.Pie(labels=d_fuente["f"], values=d_fuente["n"], hole=0.55,
+            marker_colors=[col_fuente.get(f,"#999") for f in d_fuente["f"]],
+            textinfo="percent+value", textfont=dict(size=11,family="DM Sans")))
+        fig_f.update_layout(title=dict(text="Origen de datos",font=dict(size=13,color="#0d1f3c"),x=0.02),
+            legend=dict(font=dict(size=9),orientation="h",y=-0.15),
+            paper_bgcolor="white",margin=dict(t=38,b=40,l=8,r=8),height=275)
+        st.plotly_chart(fig_f, use_container_width=True)
 
     st.markdown('<div class="sec">🚨 Contratos que requieren acción inmediata</div>', unsafe_allow_html=True)
     df_alt = df[df["riesgo"].isin(["ALTO 🔴","MEDIO 🟡"])].copy()
     if not df_alt.empty:
-        cols_a = [c for c in ["id","proveedor","comprador_canon","estado_ariba","dias_venc","riesgo","tiene_garantia"] if c in df_alt]
+        cols_a = [c for c in ["id","proveedor","comprador_canon","estado_ariba","dias_venc","riesgo","tiene_garantia","fuente"] if c in df_alt]
         ren    = {"id":"Contrato","proveedor":"Proveedor","comprador_canon":"Comprador",
-                  "estado_ariba":"Estado Ariba","dias_venc":"Días","riesgo":"Riesgo","tiene_garantia":"Garantía"}
+                  "estado_ariba":"Estado Ariba","dias_venc":"Días","riesgo":"Riesgo",
+                  "tiene_garantia":"Garantía","fuente":"Fuente"}
         tbl = df_alt[cols_a].rename(columns=ren).sort_values("Días")
         def hl(v):
             if "ALTO"  in str(v): return "background:#fef2f2;color:#991b1b;font-weight:600"
             if "MEDIO" in str(v): return "background:#fffbeb;color:#92400e;font-weight:600"
+            if str(v) == "Solo Consolidado": return "background:#f5f3ff;color:#6d28d9;font-weight:600"
             return ""
-        st.dataframe(tbl.style.map(hl, subset=["Riesgo"] if "Riesgo" in tbl.columns else [])
+        st.dataframe(tbl.style.map(hl, subset=[c for c in ["Riesgo","Fuente"] if c in tbl.columns])
                      .format({"Días":"{:.0f}"}, na_rep="—"),
                      use_container_width=True, height=240)
         a1,a2 = st.columns(2)
@@ -639,43 +760,51 @@ if tab_sync is not None:
         st.markdown("""
         <div class="alert-card blue">
           <strong>¿Cómo funciona?</strong><br>
-          Compara el <strong>Pivot de Ariba</strong> (fuente oficial, siempre al día) contra el
-          <strong>Consolidado del Drive</strong> (editado manualmente por los compradores).
-          Detecta campo a campo qué contratos tienen datos distintos y le dice a cada comprador
-          exactamente qué debe actualizar en el Drive.
+          Ahora se comparan <strong>ambas fuentes en igualdad</strong>: detecta contratos solo en Ariba
+          (deben agregarse al Consolidado), contratos solo en el Drive (gestionados por compradores,
+          no subidos a Ariba), y contratos en ambos con datos distintos.
         </div>
         """, unsafe_allow_html=True)
 
         with st.spinner("🔄 Comparando archivos..."):
             df_cmp = comparar(df_piv, df_cons_raw)
 
-        n_ok    = (df_cmp["sync_status"] == "OK").sum()
-        n_desact= (df_cmp["sync_status"] == "DESACTUALIZADO").sum()
-        n_nuevo = (df_cmp["sync_status"] == "NUEVO").sum()
-        n_rev   = (df_cmp["sync_status"] == "REVISAR").sum()
-        total_c = len(df_cmp)
-        pct_ok  = f"{n_ok/total_c*100:.0f}%" if total_c else "—"
+        n_ok      = (df_cmp["sync_status"] == "OK").sum()
+        n_desact  = (df_cmp["sync_status"] == "DESACTUALIZADO").sum()
+        n_nuevo_a = (df_cmp["sync_status"] == "NUEVO EN ARIBA").sum()
+        n_solo_c  = (df_cmp["sync_status"] == "SOLO CONSOLIDADO").sum()
+        n_rev     = (df_cmp["sync_status"] == "REVISAR").sum()
+        total_c   = len(df_cmp)
+        pct_ok    = f"{n_ok/total_c*100:.0f}%" if total_c else "—"
 
         st.markdown(f"""
         <div class="kpi-row">
           <div class="kpi g"><div class="kpi-lbl">✅ Sincronizados</div>
-            <div class="kpi-val">{n_ok:,}</div><div class="kpi-sub">{pct_ok} del Pivot</div></div>
+            <div class="kpi-val">{n_ok:,}</div><div class="kpi-sub">{pct_ok} del universo</div></div>
           <div class="kpi r"><div class="kpi-lbl">⚠️ Desactualizados</div>
             <div class="kpi-val">{n_desact:,}</div><div class="kpi-sub">estado o fecha difieren</div></div>
           <div class="kpi b"><div class="kpi-lbl">🆕 Nuevos en Ariba</div>
-            <div class="kpi-val">{n_nuevo:,}</div><div class="kpi-sub">no están en el Drive</div></div>
+            <div class="kpi-val">{n_nuevo_a:,}</div><div class="kpi-sub">faltan en el Drive</div></div>
+          <div class="kpi p"><div class="kpi-lbl">📂 Solo en Drive</div>
+            <div class="kpi-val">{n_solo_c:,}</div><div class="kpi-sub">no están en Ariba</div></div>
           <div class="kpi y"><div class="kpi-lbl">🔍 Revisar</div>
             <div class="kpi-val">{n_rev:,}</div><div class="kpi-sub">proveedor / garantía</div></div>
-          <div class="kpi"><div class="kpi-lbl">📊 Total comparados</div>
-            <div class="kpi-val">{total_c:,}</div><div class="kpi-sub">contratos en Pivot activo</div></div>
         </div>
         """, unsafe_allow_html=True)
+
+        if n_solo_c > 0:
+            st.markdown(f"""
+            <div class="alert-card purple">
+              <strong>📂 {n_solo_c} contratos están registrados solo en el Consolidado del Drive</strong><br>
+              Estos contratos son gestionados directamente por los compradores. Se muestran
+              en la lista de cada comprador y en el Explorador. Si corresponde, deberían subirse a Ariba.
+            </div>
+            """, unsafe_allow_html=True)
 
         st.markdown('<div class="sec">🔔 Alertas por comprador — qué debe actualizar cada uno</div>',
                     unsafe_allow_html=True)
 
         problemas = df_cmp[df_cmp["sync_status"] != "OK"].copy()
-        problemas["comprador_canon"] = problemas["propietario_raw"].apply(canon) if "propietario_raw" in problemas.columns else "Sin asignar"
         compradores_con_prob = sorted(problemas["comprador_canon"].dropna().unique())
 
         if not compradores_con_prob:
@@ -691,35 +820,35 @@ if tab_sync is not None:
 
                 n_grp = len(grp)
                 n_d   = (grp["sync_status"] == "DESACTUALIZADO").sum()
-                n_n   = (grp["sync_status"] == "NUEVO").sum()
+                n_n   = (grp["sync_status"] == "NUEVO EN ARIBA").sum()
+                n_sc2 = (grp["sync_status"] == "SOLO CONSOLIDADO").sum()
                 n_r   = (grp["sync_status"] == "REVISAR").sum()
                 tipo  = tipo_comprador(comp)
                 es_of = es_comprador_oficial(comp)
                 badge_tipo = f"<span style='background:#e0f2fe;color:#0369a1;border-radius:6px;padding:1px 7px;font-size:.68rem;margin-left:6px;'>{tipo}</span>" if es_of else "<span style='background:#fef9c3;color:#854d0e;border-radius:6px;padding:1px 7px;font-size:.68rem;margin-left:6px;'>No registrado</span>"
 
-                severity = "red" if n_d > 0 or n_n > 0 else "yellow"
+                severity = "red" if n_d > 0 or n_n > 0 else ("purple" if n_sc2 > 0 else "yellow")
                 partes = []
-                if n_d: partes.append(f"<strong>{n_d}</strong> desactualizados (estado/fecha diferente)")
-                if n_n: partes.append(f"<strong>{n_n}</strong> contratos nuevos en Ariba sin registrar")
-                if n_r: partes.append(f"<strong>{n_r}</strong> por revisar (proveedor/garantía)")
+                if n_d:   partes.append(f"<strong>{n_d}</strong> desactualizados (estado/fecha diferente)")
+                if n_n:   partes.append(f"<strong>{n_n}</strong> contratos nuevos en Ariba sin registrar en Drive")
+                if n_sc2: partes.append(f"<strong>{n_sc2}</strong> contratos gestionados solo en Drive (no están en Ariba)")
+                if n_r:   partes.append(f"<strong>{n_r}</strong> por revisar (proveedor/garantía)")
                 resumen_html = " · ".join(partes)
 
                 with st.expander(f"👤 {comp}{badge_tipo}  —  {n_grp} contrato(s) con diferencias", expanded=(n_d+n_n > 0)):
                     st.markdown(f"""
                     <div class="alert-card {severity}">
-                      <strong>Acción requerida para {comp}:</strong><br>{resumen_html}
+                      <strong>Situación para {comp}:</strong><br>{resumen_html}
                     </div>
                     """, unsafe_allow_html=True)
 
-                    cols_det = [c for c in ["id","proveedor","estado_ariba","estado_cons_ariba",
+                    cols_det = [c for c in ["id","proveedor","proveedor_cons","estado_ariba","estado_cons_ariba",
                                              "fecha_termino","fecha_termino_cons",
                                              "sync_status","cambios"] if c in grp.columns]
-                    ren_det  = {"id":"Contrato","proveedor":"Proveedor",
-                                "estado_ariba":"Estado Ariba (oficial)",
-                                "estado_cons_ariba":"Estado en Drive",
-                                "fecha_termino":"Fecha Ariba",
-                                "fecha_termino_cons":"Fecha en Drive",
-                                "sync_status":"Estado Sync","cambios":"Qué actualizar"}
+                    ren_det  = {"id":"Contrato","proveedor":"Proveedor (Ariba)","proveedor_cons":"Proveedor (Drive)",
+                                "estado_ariba":"Estado Ariba","estado_cons_ariba":"Estado en Drive",
+                                "fecha_termino":"Fecha Ariba","fecha_termino_cons":"Fecha en Drive",
+                                "sync_status":"Estado Sync","cambios":"Detalle"}
                     tbl_det = grp[cols_det].rename(columns=ren_det)
 
                     def hl_sync_row(val):
@@ -732,11 +861,11 @@ if tab_sync is not None:
                     st.dataframe(styled_det, use_container_width=True, height=min(300, 60 + len(grp)*38))
 
         st.markdown('<div class="sec">📊 Estado de sincronización por comprador</div>', unsafe_allow_html=True)
-        df_cmp["comprador_canon"] = df_cmp["propietario_raw"].apply(canon) if "propietario_raw" in df_cmp.columns else "Sin asignar"
         sc = df_cmp.groupby(["comprador_canon","sync_status"]).size().reset_index(name="n")
+        all_colors = {**{"OK":"#059669","DESACTUALIZADO":"#dc2626","NUEVO EN ARIBA":"#2563eb",
+                         "SOLO CONSOLIDADO":"#7c3aed","REVISAR":"#d97706"}}
         fig_sc = px.bar(sc, y="comprador_canon", x="n", color="sync_status",
-            color_discrete_map={"OK":"#059669","DESACTUALIZADO":"#dc2626","NUEVO":"#2563eb","REVISAR":"#d97706"},
-            barmode="stack", orientation="h",
+            color_discrete_map=all_colors, barmode="stack", orientation="h",
             labels={"comprador_canon":"","n":"Contratos","sync_status":"Estado"})
         fig_sc.update_layout(paper_bgcolor="white", plot_bgcolor="white",
             font=dict(family="DM Sans",size=10),
@@ -749,23 +878,28 @@ if tab_sync is not None:
 
         st.markdown('<div class="sec">📥 Exportar reporte de sincronización</div>', unsafe_allow_html=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M")
-        cols_exp = [c for c in ["id","proveedor","comprador_canon","estado_ariba","estado_cons_ariba",
+        cols_exp = [c for c in ["id","proveedor","proveedor_cons","comprador_canon",
+                                  "estado_ariba","estado_cons_ariba",
                                   "fecha_termino","fecha_termino_cons","sync_status","cambios"] if c in df_cmp.columns]
-        ren_exp  = {"id":"Contrato","proveedor":"Proveedor","comprador_canon":"Comprador",
-                    "estado_ariba":"Estado Ariba","estado_cons_ariba":"Estado Drive",
-                    "fecha_termino":"Fecha Ariba","fecha_termino_cons":"Fecha Drive",
-                    "sync_status":"Estado Sync","cambios":"Qué actualizar"}
+        ren_exp  = {"id":"Contrato","proveedor":"Proveedor Ariba","proveedor_cons":"Proveedor Drive",
+                    "comprador_canon":"Comprador","estado_ariba":"Estado Ariba",
+                    "estado_cons_ariba":"Estado Drive","fecha_termino":"Fecha Ariba",
+                    "fecha_termino_cons":"Fecha Drive","sync_status":"Estado Sync","cambios":"Detalle"}
 
-        e1,e2,e3 = st.columns(3)
+        e1,e2,e3,e4 = st.columns(4)
         with e1:
             pend = df_cmp[df_cmp["sync_status"] != "OK"][cols_exp].rename(columns=ren_exp)
             st.download_button("⚠️ Todos los pendientes", pend.to_csv(index=False).encode("utf-8-sig"),
                                f"sync_pendientes_{ts}.csv", mime="text/csv")
         with e2:
-            nuev = df_cmp[df_cmp["sync_status"]=="NUEVO"][cols_exp].rename(columns=ren_exp)
-            st.download_button("🆕 Solo contratos nuevos", nuev.to_csv(index=False).encode("utf-8-sig"),
-                               f"sync_nuevos_{ts}.csv", mime="text/csv")
+            nuev = df_cmp[df_cmp["sync_status"]=="NUEVO EN ARIBA"][cols_exp].rename(columns=ren_exp)
+            st.download_button("🆕 Nuevos en Ariba", nuev.to_csv(index=False).encode("utf-8-sig"),
+                               f"sync_nuevos_ariba_{ts}.csv", mime="text/csv")
         with e3:
+            solo_c_exp = df_cmp[df_cmp["sync_status"]=="SOLO CONSOLIDADO"][cols_exp].rename(columns=ren_exp)
+            st.download_button("📂 Solo en Drive", solo_c_exp.to_csv(index=False).encode("utf-8-sig"),
+                               f"sync_solo_drive_{ts}.csv", mime="text/csv")
+        with e4:
             desact = df_cmp[df_cmp["sync_status"]=="DESACTUALIZADO"][cols_exp].rename(columns=ren_exp)
             st.download_button("🔄 Estado/fecha diferente", desact.to_csv(index=False).encode("utf-8-sig"),
                                f"sync_desact_{ts}.csv", mime="text/csv")
@@ -775,13 +909,22 @@ if tab_sync is not None:
 # TAB: POR COMPRADOR
 # ══════════════════════════════════════════════
 with tab_comp:
+    # Info sobre fuentes
+    st.markdown("""
+    <div class="alert-card blue" style="margin-bottom:12px;">
+      Los contratos se muestran desde <strong>ambas fuentes</strong>: Ariba y Consolidado del Drive.
+      Los contratos gestionados solo en el Drive aparecen con badge <span class="badge-cons">📂 Solo Drive</span>.
+    </div>
+    """, unsafe_allow_html=True)
+
     dc = df.groupby(["comprador_canon","riesgo"]).size().reset_index(name="n")
     orden = df["comprador_canon"].value_counts().index.tolist()
     dc["comprador_canon"] = pd.Categorical(dc["comprador_canon"], categories=orden[::-1], ordered=True)
     dc = dc.sort_values("comprador_canon")
     fig_c = px.bar(dc, y="comprador_canon", x="n", color="riesgo", color_discrete_map=COL_RIESGO,
         barmode="stack", orientation="h",
-        title="Contratos por comprador", labels={"comprador_canon":"","n":"Contratos","riesgo":"Riesgo"})
+        title="Contratos por comprador (Ariba + Drive)",
+        labels={"comprador_canon":"","n":"Contratos","riesgo":"Riesgo"})
     fig_c.update_layout(paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family="DM Sans",size=10), title=dict(font=dict(size=13,color="#0d1f3c")),
         xaxis=dict(gridcolor="#f3f4f6"),
@@ -792,13 +935,14 @@ with tab_comp:
     st.plotly_chart(fig_c, use_container_width=True)
 
     resumen = df.groupby(["comprador_canon","tipo_comprador"]).agg(
-        Contratos    =("id","count"),
-        Riesgo_Alto  =("riesgo", lambda x: (x=="ALTO 🔴").sum()),
-        Riesgo_Medio =("riesgo", lambda x: (x=="MEDIO 🟡").sum()),
-        Vigentes     =("riesgo", lambda x: (x=="BAJO 🟢").sum()),
-        Indefinidos  =("es_indefinido","sum"),
-        Con_Garantia =("tiene_garantia","sum"),
-        Monto        =("monto_total","sum") if "monto_total" in df.columns else ("id","count"),
+        Contratos        =("id","count"),
+        Solo_Drive       =("fuente", lambda x: (x=="Solo Consolidado").sum()),
+        Riesgo_Alto      =("riesgo", lambda x: (x=="ALTO 🔴").sum()),
+        Riesgo_Medio     =("riesgo", lambda x: (x=="MEDIO 🟡").sum()),
+        Vigentes         =("riesgo", lambda x: (x=="BAJO 🟢").sum()),
+        Indefinidos      =("es_indefinido","sum"),
+        Con_Garantia     =("tiene_garantia","sum"),
+        Monto            =("monto_total","sum") if "monto_total" in df.columns else ("id","count"),
     ).reset_index().sort_values("Contratos", ascending=False)
     resumen.rename(columns={"comprador_canon":"Comprador","tipo_comprador":"Tipo"}, inplace=True)
     if "Monto" in resumen.columns:
@@ -868,7 +1012,7 @@ with tab_gar_tab:
     df_grisk = df[df["tiene_garantia"] & df["riesgo"].isin(["ALTO 🔴","MEDIO 🟡"])].copy()
     if not df_grisk.empty:
         st.markdown("**⚠️ Contratos con garantía en riesgo:**")
-        cols_gr = [c for c in ["id","proveedor","comprador_canon","estado_ariba","dias_venc","riesgo"] if c in df_grisk]
+        cols_gr = [c for c in ["id","proveedor","comprador_canon","estado_ariba","dias_venc","riesgo","fuente"] if c in df_grisk]
         st.dataframe(df_grisk[cols_gr].sort_values("dias_venc"), use_container_width=True, height=200)
 
 
@@ -882,15 +1026,15 @@ with tab_exp:
     with cn:
         top_n = st.selectbox("Mostrar", [50,100,200,500,"Todos"], index=1)
 
-    cols_def = [c for c in ["id","proveedor","comprador_canon","tipo_comprador","estado_ariba",
+    cols_def = [c for c in ["id","fuente","proveedor","comprador_canon","tipo_comprador","estado_ariba",
                               "fecha_inicio","fecha_termino","dias_venc","riesgo","tiene_garantia",
-                              "monto_total","rut"] if c in df.columns]
+                              "monto_total","rut","area","gerencia"] if c in df.columns]
     cols_sel = st.multiselect("Columnas", df.columns.tolist(), default=cols_def)
 
     df_exp = df.copy()
     if busq.strip():
         mask = pd.Series(False, index=df_exp.index)
-        for col in ["proveedor","descripcion","id","nombre_proyecto"]:
+        for col in ["proveedor","proveedor_cons","descripcion","id","nombre_proyecto"]:
             if col in df_exp.columns:
                 mask |= df_exp[col].astype(str).str.contains(busq.strip(), case=False, na=False)
         df_exp = df_exp[mask]
@@ -902,15 +1046,28 @@ with tab_exp:
     if cols_sel:
         df_exp = df_exp[cols_sel]
 
-    st.dataframe(df_exp, use_container_width=True, height=500)
-    st.caption(f"Mostrando {len(df_exp):,} de {len(df):,} contratos · {len(df_piv):,} total en Pivot")
+    # Colorear filas "Solo Consolidado"
+    def hl_fuente(val):
+        if str(val) == "Solo Consolidado":
+            return "background:#f5f3ff;color:#6d28d9;font-weight:600"
+        if str(val) == "Ambos":
+            return "background:#f0fdf4;color:#065f46"
+        return ""
+
+    if "fuente" in df_exp.columns:
+        st.dataframe(df_exp.style.map(hl_fuente, subset=["fuente"]),
+                     use_container_width=True, height=500)
+    else:
+        st.dataframe(df_exp, use_container_width=True, height=500)
+
+    st.caption(f"Mostrando {len(df_exp):,} de {len(df):,} contratos · {len(df_universo):,} total en universo unificado")
 
 # ──────────────────────────────────────────────────────────────
 # EXPORTACIÓN GENERAL
 # ──────────────────────────────────────────────────────────────
-st.markdown('<div class="sec">📥 Exportar datos del Pivot</div>', unsafe_allow_html=True)
+st.markdown('<div class="sec">📥 Exportar datos del universo unificado</div>', unsafe_allow_html=True)
 ts = datetime.now().strftime("%Y%m%d_%H%M")
-ex1,ex2,ex3,ex4 = st.columns(4)
+ex1,ex2,ex3,ex4,ex5 = st.columns(5)
 with ex1:
     st.download_button("💾 Vista actual · CSV", df.to_csv(index=False).encode("utf-8-sig"),
                        f"contratos_{ts}.csv", mime="text/csv")
@@ -926,6 +1083,10 @@ with ex4:
     gdf = df[df["tiene_garantia"]]
     st.download_button("🔒 Con garantía · CSV", gdf.to_csv(index=False).encode("utf-8-sig"),
                        f"contratos_garantia_{ts}.csv", mime="text/csv")
+with ex5:
+    sc_exp = df[df["fuente"] == "Solo Consolidado"] if "fuente" in df.columns else pd.DataFrame()
+    st.download_button("📂 Solo Drive · CSV", sc_exp.to_csv(index=False).encode("utf-8-sig"),
+                       f"contratos_solo_drive_{ts}.csv", mime="text/csv")
 
 # ──────────────────────────────────────────────────────────────
 # DIAGNÓSTICO
@@ -933,11 +1094,15 @@ with ex4:
 with st.expander("🔧 Diagnóstico técnico"):
     d1,d2 = st.columns(2)
     with d1:
+        fuente_counts = df_universo["fuente"].value_counts().to_dict()
         st.json({"Total Pivot (activos)":len(df_piv),
-                 "Con garantía":int(df_piv["tiene_garantia"].sum()),
-                 "Indefinidos":int(df_piv["es_indefinido"].sum()),
-                 "Compradores oficiales":int(df_piv["es_oficial"].sum()),
-                 "Compradores no registrados":int((~df_piv["es_oficial"]).sum())})
+                 "Total universo unificado":len(df_universo),
+                 "En ambas fuentes": fuente_counts.get("Ambos",0),
+                 "Solo en Ariba":    fuente_counts.get("Ariba",0),
+                 "Solo en Drive":    fuente_counts.get("Solo Consolidado",0),
+                 "Con garantía":int(df_universo["tiene_garantia"].sum()),
+                 "Indefinidos":int(df_universo["es_indefinido"].sum()),
+                 "Compradores oficiales":int(df_universo["es_oficial"].sum())})
     with d2:
         st.json({"Contratos en vista":len(df),
                  "Riesgo ALTO":int((df["riesgo"]=="ALTO 🔴").sum()),
@@ -948,6 +1113,7 @@ with st.expander("🔧 Diagnóstico técnico"):
 st.markdown(f"""
 <div style="text-align:center;color:#9ca3af;font-size:.69rem;margin-top:24px;
      padding-top:12px;border-top:1px solid #f3f4f6;">
-  Softys Chile · Compras Estratégicas · {datetime.now().strftime('%d/%m/%Y %H:%M')} · Fuente: SAP Ariba Analysis
+  Softys Chile · Compras Estratégicas · {datetime.now().strftime('%d/%m/%Y %H:%M')}
+  · Fuentes: SAP Ariba Analysis + Consolidado Drive
 </div>
 """, unsafe_allow_html=True)
