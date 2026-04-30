@@ -7,7 +7,6 @@ automáticamente qué datos están desactualizados y quién debe actualizarlos.
 ACTUALIZACIÓN: El Consolidado ahora es fuente válida junto al Pivot.
 Los contratos que existen solo en el Consolidado se muestran marcados
 como "Solo Consolidado" y se incluyen en la vista de cada comprador.
-NUEVO: Detecta cuando un contrato tiene diferente comprador asignado en cada archivo.
 
 Instalar:  pip install streamlit pandas plotly openpyxl
 Ejecutar:  streamlit run dashboard_pivot.py
@@ -231,15 +230,15 @@ def fmt_m(v: float) -> str:
     return f"${v:.0f}"
 
 # ──────────────────────────────────────────────────────────────
-# ACTUALIZACIÓN: Colores para nuevo estado "CAMBIO DE COMPRADOR"
+# COLORES PARA ESTADOS DE SINCRONIZACIÓN (sin "CAMBIO DE COMPRADOR")
 # ──────────────────────────────────────────────────────────────
 COL_RIESGO = {"BAJO 🟢":"#059669","MEDIO 🟡":"#d97706","ALTO 🔴":"#dc2626","REVISAR ⚪":"#6b7280"}
 COL_SYNC   = {"OK":"#059669","DESACTUALIZADO":"#dc2626","NUEVO EN ARIBA":"#2563eb",
-               "SOLO CONSOLIDADO":"#7c3aed","CAMBIO DE COMPRADOR":"#f59e0b","REVISAR":"#d97706"}
+               "SOLO CONSOLIDADO":"#7c3aed","REVISAR":"#d97706"}
 BG_SYNC    = {"OK":"#f0fdf4","DESACTUALIZADO":"#fef2f2","NUEVO EN ARIBA":"#eff6ff",
-               "SOLO CONSOLIDADO":"#f5f3ff","CAMBIO DE COMPRADOR":"#fef3c7","REVISAR":"#fffbeb"}
+               "SOLO CONSOLIDADO":"#f5f3ff","REVISAR":"#fffbeb"}
 FG_SYNC    = {"OK":"#065f46","DESACTUALIZADO":"#991b1b","NUEVO EN ARIBA":"#1e40af",
-               "SOLO CONSOLIDADO":"#6d28d9","CAMBIO DE COMPRADOR":"#92400e","REVISAR":"#92400e"}
+               "SOLO CONSOLIDADO":"#6d28d9","REVISAR":"#92400e"}
 
 # ──────────────────────────────────────────────────────────────
 # CARGA Y TRANSFORMACIÓN
@@ -384,7 +383,7 @@ def construir_universo(df_p: pd.DataFrame, df_c: pd.DataFrame | None) -> pd.Data
 
 
 # ──────────────────────────────────────────────────────────────
-# MOTOR DE COMPARACIÓN (CORREGIDO: prioridad correcta de estados)
+# MOTOR DE COMPARACIÓN (CORREGIDO: sin estado "CAMBIO DE COMPRADOR" visible)
 # ──────────────────────────────────────────────────────────────
 
 def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
@@ -396,7 +395,7 @@ def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
     merged["es_nuevo_ariba"]    = merged["_merge"] == "left_only"   # en Ariba, no en Consolidado
     merged["es_solo_cons"]      = merged["_merge"] == "right_only"  # en Consolidado, no en Ariba
 
-    # ── Detectar diferencia en comprador asignado ──
+    # ── Detectar diferencia en comprador (USO INTERNO, no se muestra como estado) ──
     def _dif_comprador(r):
         if r["es_nuevo_ariba"] or r["es_solo_cons"]:
             return False
@@ -427,22 +426,19 @@ def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
         lambda r: not r["es_nuevo_ariba"] and not r["es_solo_cons"] and
                   norm(r.get("garantia_ariba","")) != norm(r.get("garantia_cons","")), axis=1)
 
-    # ── CORRECCIÓN: Prioridad correcta de estados ──
+    # ── CORRECCIÓN: Estados visibles (sin "CAMBIO DE COMPRADOR") ──
     def _status(r):
         # 1. Prioridad máxima: contratos que solo existen en una fuente
         if r["es_solo_cons"]:                        return "SOLO CONSOLIDADO"
         if r["es_nuevo_ariba"]:                      return "NUEVO EN ARIBA"
         
-        # 2. Prioridad alta: diferencias críticas (estado o fecha) ← ESTO ES LO MÁS IMPORTANTE
+        # 2. Prioridad ALTA: diferencias críticas (estado o fecha) ← LO MÁS IMPORTANTE
         if r["dif_estado"] or r["dif_fecha"]:        return "DESACTUALIZADO"
         
-        # 3. Prioridad media: cambio de comprador (solo si NO hay diferencias críticas)
-        if r["dif_comprador"]:                       return "CAMBIO DE COMPRADOR"
-        
-        # 4. Prioridad baja: diferencias menores (proveedor/garantía)
+        # 3. Prioridad baja: diferencias menores (proveedor/garantía)
         if r["dif_proveedor"] or r["dif_garantia"]:  return "REVISAR"
         
-        # 5. Todo OK
+        # 4. Todo OK (incluye casos con cambio de comprador, pero no se muestra)
         return "OK"
     merged["sync_status"] = merged.apply(_status, axis=1)
     # ───────────────────────────────────────────────────────
@@ -453,11 +449,12 @@ def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
             return f"📂 Contrato registrado solo en el Consolidado (comprador: {comp}) — verificar si debe subirse a Ariba"
         if r["es_nuevo_ariba"]:
             return "🆕 Contrato nuevo en Ariba — no existe en el Consolidado"
+        msgs = []
+        # ← Cambio de comprador: información adicional, no afecta el estado principal
         if r["dif_comprador"]:
             comp_pivot = r.get("propietario_raw","—")
             comp_cons = r.get("comprador_estrat", r.get("comprador_tact","—"))
-            return f"👤 Cambio de comprador: Pivot=«{comp_pivot}» / Consolidado=«{comp_cons}»"
-        msgs = []
+            msgs.append(f"👤 Comprador: Pivot=«{comp_pivot}» / Consolidado=«{comp_cons}»")
         if r["dif_estado"]:
             ea = r.get("estado_ariba","—")
             ec = r.get("estado_cons_ariba","—") or "vacío"
@@ -475,7 +472,7 @@ def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
         return " | ".join(msgs) if msgs else "✅ Sincronizado"
     merged["cambios"] = merged.apply(_cambios, axis=1)
 
-    # Reparar comprador_canon: priorizar Consolidado cuando hay discrepancia
+    # Reparar comprador_canon: priorizar Consolidado cuando hay discrepancia (USO INTERNO)
     def _comp_merged(r):
         if r.get("es_solo_cons"):
             ce = str(r.get("comprador_estrat","")).strip()
@@ -811,7 +808,6 @@ if tab_sync is not None:
         n_nuevo_a = (df_cmp["sync_status"] == "NUEVO EN ARIBA").sum()
         n_solo_c  = (df_cmp["sync_status"] == "SOLO CONSOLIDADO").sum()
         n_rev     = (df_cmp["sync_status"] == "REVISAR").sum()
-        n_cambio_comp = (df_cmp["sync_status"] == "CAMBIO DE COMPRADOR").sum()  # ← NUEVO
         total_c   = len(df_cmp)
         pct_ok    = f"{n_ok/total_c*100:.0f}%" if total_c else "—"
 
@@ -825,8 +821,6 @@ if tab_sync is not None:
             <div class="kpi-val">{n_nuevo_a:,}</div><div class="kpi-sub">faltan en el Drive</div></div>
           <div class="kpi p"><div class="kpi-lbl">📂 Solo en Drive</div>
             <div class="kpi-val">{n_solo_c:,}</div><div class="kpi-sub">no están en Ariba</div></div>
-          <div class="kpi o"><div class="kpi-lbl">👤 Cambio comprador</div>
-            <div class="kpi-val">{n_cambio_comp:,}</div><div class="kpi-sub">asignación manual</div></div>
           <div class="kpi y"><div class="kpi-lbl">🔍 Revisar</div>
             <div class="kpi-val">{n_rev:,}</div><div class="kpi-sub">proveedor / garantía</div></div>
         </div>
@@ -838,15 +832,6 @@ if tab_sync is not None:
               <strong>📂 {n_solo_c} contratos están registrados solo en el Consolidado del Drive</strong><br>
               Estos contratos son gestionados directamente por los compradores. Se muestran
               en la lista de cada comprador y en el Explorador. Si corresponde, deberían subirse a Ariba.
-            </div>
-            """, unsafe_allow_html=True)
-
-        if n_cambio_comp > 0:  # ← NUEVO
-            st.markdown(f"""
-            <div class="alert-card yellow">
-              <strong>👤 {n_cambio_comp} contratos con cambio de comprador</strong><br>
-              Estos contratos existen en ambas fuentes pero tienen diferente comprador asignado.
-              Se prioriza la asignación del Consolidado (gestión manual más reciente).
             </div>
             """, unsafe_allow_html=True)
 
@@ -871,18 +856,16 @@ if tab_sync is not None:
                 n_d   = (grp["sync_status"] == "DESACTUALIZADO").sum()
                 n_n   = (grp["sync_status"] == "NUEVO EN ARIBA").sum()
                 n_sc2 = (grp["sync_status"] == "SOLO CONSOLIDADO").sum()
-                n_cc  = (grp["sync_status"] == "CAMBIO DE COMPRADOR").sum()  # ← NUEVO
                 n_r   = (grp["sync_status"] == "REVISAR").sum()
                 tipo  = tipo_comprador(comp)
                 es_of = es_comprador_oficial(comp)
                 badge_tipo = f"<span style='background:#e0f2fe;color:#0369a1;border-radius:6px;padding:1px 7px;font-size:.68rem;margin-left:6px;'>{tipo}</span>" if es_of else "<span style='background:#fef9c3;color:#854d0e;border-radius:6px;padding:1px 7px;font-size:.68rem;margin-left:6px;'>No registrado</span>"
 
-                severity = "red" if n_d > 0 or n_n > 0 else ("purple" if n_sc2 > 0 else ("yellow" if n_cc > 0 else "yellow"))
+                severity = "red" if n_d > 0 or n_n > 0 else ("purple" if n_sc2 > 0 else "yellow")
                 partes = []
                 if n_d:   partes.append(f"<strong>{n_d}</strong> desactualizados (estado/fecha diferente)")
                 if n_n:   partes.append(f"<strong>{n_n}</strong> contratos nuevos en Ariba sin registrar en Drive")
                 if n_sc2: partes.append(f"<strong>{n_sc2}</strong> contratos gestionados solo en Drive (no están en Ariba)")
-                if n_cc:  partes.append(f"<strong>{n_cc}</strong> con cambio de comprador (asignación manual)")  # ← NUEVO
                 if n_r:   partes.append(f"<strong>{n_r}</strong> por revisar (proveedor/garantía)")
                 resumen_html = " · ".join(partes)
 
@@ -914,7 +897,7 @@ if tab_sync is not None:
         st.markdown('<div class="sec">📊 Estado de sincronización por comprador</div>', unsafe_allow_html=True)
         sc = df_cmp.groupby(["comprador_canon","sync_status"]).size().reset_index(name="n")
         all_colors = {**{"OK":"#059669","DESACTUALIZADO":"#dc2626","NUEVO EN ARIBA":"#2563eb",
-                         "SOLO CONSOLIDADO":"#7c3aed","CAMBIO DE COMPRADOR":"#f59e0b","REVISAR":"#d97706"}}  # ← NUEVO
+                         "SOLO CONSOLIDADO":"#7c3aed","REVISAR":"#d97706"}}
         fig_sc = px.bar(sc, y="comprador_canon", x="n", color="sync_status",
             color_discrete_map=all_colors, barmode="stack", orientation="h",
             labels={"comprador_canon":"","n":"Contratos","sync_status":"Estado"})
@@ -937,7 +920,7 @@ if tab_sync is not None:
                     "estado_cons_ariba":"Estado Drive","fecha_termino":"Fecha Ariba",
                     "fecha_termino_cons":"Fecha Drive","sync_status":"Estado Sync","cambios":"Detalle"}
 
-        e1,e2,e3,e4,e5 = st.columns(5)  # ← NUEVO: 5 columnas
+        e1,e2,e3,e4 = st.columns(4)
         with e1:
             pend = df_cmp[df_cmp["sync_status"] != "OK"][cols_exp].rename(columns=ren_exp)
             st.download_button("⚠️ Todos los pendientes", pend.to_csv(index=False).encode("utf-8-sig"),
@@ -951,10 +934,6 @@ if tab_sync is not None:
             st.download_button("📂 Solo en Drive", solo_c_exp.to_csv(index=False).encode("utf-8-sig"),
                                f"sync_solo_drive_{ts}.csv", mime="text/csv")
         with e4:
-            cambio_comp = df_cmp[df_cmp["sync_status"]=="CAMBIO DE COMPRADOR"][cols_exp].rename(columns=ren_exp)  # ← NUEVO
-            st.download_button("👤 Cambio comprador", cambio_comp.to_csv(index=False).encode("utf-8-sig"),
-                               f"sync_cambio_comprador_{ts}.csv", mime="text/csv")
-        with e5:
             desact = df_cmp[df_cmp["sync_status"]=="DESACTUALIZADO"][cols_exp].rename(columns=ren_exp)
             st.download_button("🔄 Estado/fecha diferente", desact.to_csv(index=False).encode("utf-8-sig"),
                                f"sync_desact_{ts}.csv", mime="text/csv")
