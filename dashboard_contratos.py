@@ -360,12 +360,24 @@ html, body, [class*="css"] {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
-/* ── SIDEBAR: fondo oscuro → texto BLANCO ── */
+/* ── SIDEBAR: fondo oscuro → texto BLANCO (selectivo) ── */
 section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, #003F7A 0%, #005CA9 60%, #0072CE 100%);
     border-right: 1px solid #004f96;
 }
-section[data-testid="stSidebar"] * { color: #FFFFFF !important; }
+
+/* Texto blanco para labels, títulos y elementos directos de la sidebar */
+section[data-testid="stSidebar"] .stMarkdown p,
+section[data-testid="stSidebar"] .stMarkdown h1,
+section[data-testid="stSidebar"] .stMarkdown h2,
+section[data-testid="stSidebar"] .stMarkdown h3,
+section[data-testid="stSidebar"] label:not([class*="FileUploader"]) span,
+section[data-testid="stSidebar"] > div > div > label,
+section[data-testid="stSidebar"] .stCheckbox label span {
+    color: #FFFFFF !important;
+}
+
+/* Selectboxes y multiselect en sidebar - fondo semi-transparente, texto blanco */
 section[data-testid="stSidebar"] .stSelectbox > div > div,
 section[data-testid="stSidebar"] .stMultiSelect > div > div {
     background: rgba(255,255,255,0.15) !important;
@@ -373,10 +385,33 @@ section[data-testid="stSidebar"] .stMultiSelect > div > div {
     color: #FFFFFF !important;
     border-radius: 8px !important;
 }
-section[data-testid="stSidebar"] .stCheckbox label span { color: #FFFFFF !important; }
-section[data-testid="stSidebar"] hr { border-color: rgba(255,255,255,0.25); margin: 10px 0; }
-section[data-testid="stSidebar"] .stCaption { color: rgba(255,255,255,0.85) !important; font-size:.72rem !important; }
 
+/* File uploaders en sidebar - fondo blanco, texto negro */
+section[data-testid="stSidebar"] .stFileUploader,
+section[data-testid="stSidebar"] .stFileUploader *,
+section[data-testid="stSidebar"] [class*="stFileUploader"] *,
+section[data-testid="stSidebar"] div[data-testid="stFileUploader"] * {
+    color: #000000 !important;
+}
+
+/* Alerts/cards con fondo claro en sidebar - texto oscuro */
+section[data-testid="stSidebar"] .stAlert *,
+section[data-testid="stSidebar"] .persist-card *,
+section[data-testid="stSidebar"] div[data-testid="stExpander"] * {
+    color: #000000 !important;
+}
+
+/* HR y captions en sidebar */
+section[data-testid="stSidebar"] hr { 
+    border-color: rgba(255,255,255,0.25); 
+    margin: 10px 0; 
+}
+section[data-testid="stSidebar"] .stCaption { 
+    color: rgba(255,255,255,0.85) !important; 
+    font-size:.72rem !important; 
+}
+
+/* Botón colapsable de sidebar */
 button[kind="headerNoPadding"], [data-testid="collapsedControl"] {
     display: flex !important; visibility: visible !important; opacity: 1 !important;
     background: #005CA9 !important; border-radius: 0 8px 8px 0 !important;
@@ -477,7 +512,6 @@ button[kind="headerNoPadding"], [data-testid="collapsedControl"] {
 #MainMenu, footer, header { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
-
 # ──────────────────────────────────────────────────────────────
 # LISTAS OFICIALES DE COMPRADORES
 # ──────────────────────────────────────────────────────────────
