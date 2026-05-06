@@ -1,12 +1,10 @@
 """
 dashboard_pivot.py — Softys Chile · Compras Estratégicas
 =========================================================
-Sube el Pivot (Ariba) + Consolidado (Drive) y el sistema detecta
-automáticamente qué datos están desactualizados y quién debe actualizarlos.
-
-ACTUALIZACIÓN: El Consolidado ahora es fuente válida junto al Pivot.
-Los contratos que existen solo en el Consolidado se muestran marcados
-como "Solo Consolidado" y se incluyen en la vista de cada comprador.
+VERSIÓN CON PERSISTENCIA DE ARCHIVOS
+=====================================
+El Pivot de Ariba se guarda en ./data/pivot_persistente/ con metadata JSON.
+Cualquier sesión nueva carga automáticamente el último Pivot subido.
 
 Instalar:  pip install streamlit pandas plotly openpyxl
 Ejecutar:  streamlit run dashboard_pivot.py
@@ -21,6 +19,9 @@ from io import BytesIO
 import hashlib
 import openpyxl
 import warnings
+import json
+import os
+import shutil
 warnings.filterwarnings("ignore")
 
 # ──────────────────────────────────────────────────────────────
@@ -29,37 +30,187 @@ warnings.filterwarnings("ignore")
 st.set_page_config(page_title="Gestión de Contratos · Softys", page_icon="📋",
                    layout="wide", initial_sidebar_state="expanded")
 
-# ── PALETA SOFTYS ─────────────────────────────────────────────
-# Azul corporativo principal : #005CA9  (navy profundo del sitio softys.com)
-# Azul medio                 : #0072CE  (links y acentos)
-# Azul claro                 : #E8F2FB  (fondos sutiles)
-# Verde sostenibilidad       : #00A651  (KPIs positivos)
-# Gris oscuro                : #2D3748  (textos)
-# Gris claro                 : #F5F7FA  (fondos)
-# Rojo alerta                : #E02020  (riesgo alto)
-# Ámbar advertencia          : #F59E0B  (riesgo medio)
-# Violeta Drive              : #6C3FC4  (solo consolidado)
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# ▶ BLOQUE 1: PERSISTENCIA DE ARCHIVOS
+#   Añadir justo debajo de set_page_config, antes del CSS
+# ══════════════════════════════════════════════════════════════
 
+# ── Rutas de persistencia ─────────────────────────────────────
+PERSIST_DIR      = os.path.join(os.path.dirname(__file__), "data", "pivot_persistente")
+PERSIST_PIVOT    = os.path.join(PERSIST_DIR, "pivot_ariba.xlsx")
+PERSIST_CONS     = os.path.join(PERSIST_DIR, "consolidado_drive.xlsx")
+PERSIST_META     = os.path.join(PERSIST_DIR, "metadata.json")
+
+os.makedirs(PERSIST_DIR, exist_ok=True)
+
+
+def _md5(data: bytes) -> str:
+    return hashlib.md5(data).hexdigest()
+
+
+def guardar_pivot_persistente(content: bytes, filename: str, session_id: str = "desconocido") -> dict:
+    """
+    Guarda el Pivot en disco y actualiza metadata.json.
+    Devuelve el dict de metadata actualizado.
+    """
+    tmp_path = PERSIST_PIVOT + ".tmp"
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(content)
+        shutil.move(tmp_path, PERSIST_PIVOT)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    meta = cargar_metadata()
+    meta["pivot"] = {
+        "filename":   filename,
+        "hash_md5":   _md5(content),
+        "size_bytes": len(content),
+        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "uploaded_by": session_id,
+    }
+    _escribir_metadata(meta)
+    # Limpiar cache para forzar re-procesamiento
+    cargar_pivot.clear()
+    return meta
+
+
+def guardar_cons_persistente(content: bytes, filename: str, session_id: str = "desconocido") -> dict:
+    """
+    Guarda el Consolidado en disco y actualiza metadata.json.
+    """
+    tmp_path = PERSIST_CONS + ".tmp"
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(content)
+        shutil.move(tmp_path, PERSIST_CONS)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    meta = cargar_metadata()
+    meta["consolidado"] = {
+        "filename":   filename,
+        "hash_md5":   _md5(content),
+        "size_bytes": len(content),
+        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "uploaded_by": session_id,
+    }
+    _escribir_metadata(meta)
+    cargar_consolidado.clear()
+    return meta
+
+
+def eliminar_pivot_persistente():
+    """Elimina el Pivot persistente y su metadata."""
+    if os.path.exists(PERSIST_PIVOT):
+        os.remove(PERSIST_PIVOT)
+    meta = cargar_metadata()
+    meta.pop("pivot", None)
+    _escribir_metadata(meta)
+    cargar_pivot.clear()
+
+
+def eliminar_cons_persistente():
+    """Elimina el Consolidado persistente y su metadata."""
+    if os.path.exists(PERSIST_CONS):
+        os.remove(PERSIST_CONS)
+    meta = cargar_metadata()
+    meta.pop("consolidado", None)
+    _escribir_metadata(meta)
+    cargar_consolidado.clear()
+
+
+def cargar_metadata() -> dict:
+    """Lee metadata.json; devuelve {} si no existe o está corrupto."""
+    if not os.path.exists(PERSIST_META):
+        return {}
+    try:
+        with open(PERSIST_META, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _escribir_metadata(meta: dict):
+    with open(PERSIST_META, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+def leer_pivot_persistente() -> tuple[bytes | None, dict | None]:
+    """
+    Lee el archivo Pivot guardado en disco y valida su integridad via MD5.
+    Devuelve (bytes, meta_pivot) o (None, None) si no existe/está corrupto.
+    """
+    meta = cargar_metadata()
+    meta_pivot = meta.get("pivot")
+    if not meta_pivot or not os.path.exists(PERSIST_PIVOT):
+        return None, None
+    try:
+        with open(PERSIST_PIVOT, "rb") as f:
+            content = f.read()
+        if _md5(content) != meta_pivot.get("hash_md5", ""):
+            st.warning("⚠️ El archivo Pivot guardado no supera la validación de integridad (MD5 distinto). Por favor, vuelve a subirlo.")
+            return None, None
+        return content, meta_pivot
+    except Exception as e:
+        st.warning(f"⚠️ Error al leer el Pivot guardado: {e}. Por favor, vuelve a subirlo.")
+        return None, None
+
+
+def leer_cons_persistente() -> tuple[bytes | None, dict | None]:
+    """
+    Lee el Consolidado guardado y valida su integridad.
+    """
+    meta = cargar_metadata()
+    meta_cons = meta.get("consolidado")
+    if not meta_cons or not os.path.exists(PERSIST_CONS):
+        return None, None
+    try:
+        with open(PERSIST_CONS, "rb") as f:
+            content = f.read()
+        if _md5(content) != meta_cons.get("hash_md5", ""):
+            st.warning("⚠️ El Consolidado guardado no supera la validación de integridad. Por favor, vuelve a subirlo.")
+            return None, None
+        return content, meta_cons
+    except Exception as e:
+        st.warning(f"⚠️ Error al leer el Consolidado guardado: {e}.")
+        return None, None
+
+
+def _fmt_size(size_bytes: int) -> str:
+    if size_bytes >= 1_048_576:
+        return f"{size_bytes/1_048_576:.1f} MB"
+    if size_bytes >= 1_024:
+        return f"{size_bytes/1_024:.0f} KB"
+    return f"{size_bytes} B"
+
+
+def _session_id() -> str:
+    """Identificador simple de sesión (no autenticado)."""
+    if "session_id" not in st.session_state:
+        import uuid
+        st.session_state["session_id"] = str(uuid.uuid4())[:8]
+    return st.session_state["session_id"]
+
+
+# ──────────────────────────────────────────────────────────────
+# PALETA Y ESTILOS SOFTYS (sin cambios)
+# ──────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 
-/* ── Reset global ── */
 html, body, [class*="css"] {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
-/* ════════════════════════════════════════════
-   SIDEBAR — Azul corporativo Softys
-════════════════════════════════════════════ */
 section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, #003F7A 0%, #005CA9 60%, #0072CE 100%);
     border-right: 1px solid #004f96;
 }
-section[data-testid="stSidebar"] * {
-    color: #E8F2FB !important;
-}
+section[data-testid="stSidebar"] * { color: #E8F2FB !important; }
 section[data-testid="stSidebar"] .stSelectbox > div > div,
 section[data-testid="stSidebar"] .stMultiSelect > div > div {
     background: rgba(255,255,255,0.1) !important;
@@ -67,104 +218,31 @@ section[data-testid="stSidebar"] .stMultiSelect > div > div {
     color: #ffffff !important;
     border-radius: 8px !important;
 }
-section[data-testid="stSidebar"] .stCheckbox label span {
-    color: #E8F2FB !important;
-}
-section[data-testid="stSidebar"] hr {
-    border-color: rgba(255,255,255,0.2);
-    margin: 10px 0;
-}
-section[data-testid="stSidebar"] .stCaption {
-    color: rgba(232,242,251,0.7) !important;
-    font-size: .72rem !important;
-}
+section[data-testid="stSidebar"] .stCheckbox label span { color: #E8F2FB !important; }
+section[data-testid="stSidebar"] hr { border-color: rgba(255,255,255,0.2); margin: 10px 0; }
+section[data-testid="stSidebar"] .stCaption { color: rgba(232,242,251,0.7) !important; font-size:.72rem !important; }
 
-/* Botón toggle sidebar */
-button[kind="headerNoPadding"],
-[data-testid="collapsedControl"] {
-    display: flex !important;
-    visibility: visible !important;
-    opacity: 1 !important;
-    background: #005CA9 !important;
-    border-radius: 0 8px 8px 0 !important;
-    border: 1px solid #0072CE !important;
-    border-left: none !important;
-    padding: 6px 4px !important;
-    z-index: 999999 !important;
+button[kind="headerNoPadding"], [data-testid="collapsedControl"] {
+    display: flex !important; visibility: visible !important; opacity: 1 !important;
+    background: #005CA9 !important; border-radius: 0 8px 8px 0 !important;
+    border: 1px solid #0072CE !important; border-left: none !important;
+    padding: 6px 4px !important; z-index: 999999 !important;
 }
-[data-testid="collapsedControl"] svg {
-    fill: #E8F2FB !important;
-    color: #E8F2FB !important;
-    visibility: visible !important;
-    opacity: 1 !important;
-}
-[data-testid="collapsedControl"] {
-    position: fixed !important;
-    top: 50% !important;
-    left: 0 !important;
-    transform: translateY(-50%) !important;
-}
+[data-testid="collapsedControl"] svg { fill: #E8F2FB !important; color: #E8F2FB !important; visibility: visible !important; opacity: 1 !important; }
+[data-testid="collapsedControl"] { position: fixed !important; top: 50% !important; left: 0 !important; transform: translateY(-50%) !important; }
 
-/* ════════════════════════════════════════════
-   FONDO GENERAL
-════════════════════════════════════════════ */
 .stApp { background: #F5F7FA; }
 .block-container { padding-top: 1.4rem; padding-bottom: 2rem; }
 
-/* ════════════════════════════════════════════
-   TABS — estilo Softys
-════════════════════════════════════════════ */
-.stTabs [data-baseweb="tab-list"] {
-    background: transparent;
-    gap: 4px;
-    border-bottom: 2px solid #D1DCE8;
-    padding-bottom: 0;
-}
-.stTabs [data-baseweb="tab"] {
-    background: transparent;
-    border: none;
-    border-bottom: 3px solid transparent;
-    color: #5A7490;
-    font-size: .82rem;
-    font-weight: 600;
-    padding: 8px 16px;
-    letter-spacing: .02em;
-    border-radius: 6px 6px 0 0;
-    transition: all .15s ease;
-}
-.stTabs [data-baseweb="tab"]:hover {
-    color: #005CA9;
-    background: #EAF2FB;
-}
-.stTabs [aria-selected="true"] {
-    color: #005CA9 !important;
-    border-bottom: 3px solid #005CA9 !important;
-    background: transparent !important;
-}
-.stTabs [data-baseweb="tab-panel"] {
-    padding-top: 14px;
-}
+.stTabs [data-baseweb="tab-list"] { background: transparent; gap: 4px; border-bottom: 2px solid #D1DCE8; padding-bottom: 0; }
+.stTabs [data-baseweb="tab"] { background: transparent; border: none; border-bottom: 3px solid transparent; color: #5A7490; font-size: .82rem; font-weight: 600; padding: 8px 16px; letter-spacing: .02em; border-radius: 6px 6px 0 0; transition: all .15s ease; }
+.stTabs [data-baseweb="tab"]:hover { color: #005CA9; background: #EAF2FB; }
+.stTabs [aria-selected="true"] { color: #005CA9 !important; border-bottom: 3px solid #005CA9 !important; background: transparent !important; }
+.stTabs [data-baseweb="tab-panel"] { padding-top: 14px; }
 
-/* ════════════════════════════════════════════
-   KPI CARDS
-════════════════════════════════════════════ */
-.kpi-row {
-    display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    gap: 12px;
-    margin-bottom: 16px;
-}
-.kpi {
-    background: #ffffff;
-    border-radius: 12px;
-    padding: 16px 14px 13px;
-    border-top: 3px solid #0072CE;
-    box-shadow: 0 1px 4px rgba(0,92,169,.08), 0 4px 12px rgba(0,0,0,.04);
-    transition: box-shadow .2s ease;
-}
+.kpi-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 16px; }
+.kpi { background: #ffffff; border-radius: 12px; padding: 16px 14px 13px; border-top: 3px solid #0072CE; box-shadow: 0 1px 4px rgba(0,92,169,.08), 0 4px 12px rgba(0,0,0,.04); transition: box-shadow .2s ease; }
 .kpi:hover { box-shadow: 0 4px 16px rgba(0,92,169,.13); }
-
-/* Variantes de color superior */
 .kpi.g  { border-top-color: #00A651; }
 .kpi.r  { border-top-color: #E02020; }
 .kpi.y  { border-top-color: #F59E0B; }
@@ -172,122 +250,66 @@ button[kind="headerNoPadding"],
 .kpi.b  { border-top-color: #0072CE; }
 .kpi.p  { border-top-color: #6C3FC4; }
 .kpi.o  { border-top-color: #EA580C; }
+.kpi-lbl { font-size: .65rem; text-transform: uppercase; letter-spacing: .08em; color: #7A96AF; font-weight: 700; margin-bottom: 4px; }
+.kpi-val { font-size: 1.9rem; font-weight: 800; color: #1A2E44; line-height: 1.05; letter-spacing: -.02em; }
+.kpi-sub { font-size: .68rem; color: #A0B4C4; margin-top: 3px; font-weight: 400; }
 
-.kpi-lbl {
-    font-size: .65rem;
-    text-transform: uppercase;
-    letter-spacing: .08em;
-    color: #7A96AF;
-    font-weight: 700;
-    margin-bottom: 4px;
-}
-.kpi-val {
-    font-size: 1.9rem;
-    font-weight: 800;
-    color: #1A2E44;
-    line-height: 1.05;
-    letter-spacing: -.02em;
-}
-.kpi-sub {
-    font-size: .68rem;
-    color: #A0B4C4;
-    margin-top: 3px;
-    font-weight: 400;
-}
-
-/* ════════════════════════════════════════════
-   ALERT / INFO CARDS
-════════════════════════════════════════════ */
-.alert-card {
-    border-radius: 10px;
-    padding: 12px 16px;
-    margin-bottom: 10px;
-    font-size: .84rem;
-    line-height: 1.6;
-}
+.alert-card { border-radius: 10px; padding: 12px 16px; margin-bottom: 10px; font-size: .84rem; line-height: 1.6; }
 .alert-card.red    { background: #FEF2F2; border-left: 4px solid #E02020; color: #7F1D1D; }
 .alert-card.yellow { background: #FFFBEB; border-left: 4px solid #F59E0B; color: #78350F; }
 .alert-card.blue   { background: #EAF2FB; border-left: 4px solid #0072CE; color: #1E3A5F; }
 .alert-card.green  { background: #F0FDF4; border-left: 4px solid #00A651; color: #14532D; }
 .alert-card.purple { background: #F5F0FF; border-left: 4px solid #6C3FC4; color: #3B1A78; }
 
-/* ════════════════════════════════════════════
-   SECTION HEADERS
-════════════════════════════════════════════ */
-.sec {
-    font-size: .9rem;
-    font-weight: 700;
-    color: #005CA9;
-    border-bottom: 2px solid #D1DCE8;
-    padding-bottom: 6px;
-    margin: 22px 0 12px;
-    letter-spacing: .01em;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-/* ════════════════════════════════════════════
-   DATAFRAMES / TABLES
-════════════════════════════════════════════ */
-[data-testid="stDataFrame"] {
-    border-radius: 10px;
-    overflow: hidden;
-    border: 1px solid #D1DCE8;
-    box-shadow: 0 1px 4px rgba(0,0,0,.04);
-}
-
-/* ════════════════════════════════════════════
-   BOTONES DE DESCARGA
-════════════════════════════════════════════ */
-.stDownloadButton > button {
-    background: #005CA9;
-    color: #ffffff;
-    border: none;
-    border-radius: 8px;
-    font-size: .78rem;
-    font-weight: 600;
-    padding: 8px 14px;
-    width: 100%;
-    transition: background .15s ease;
-}
-.stDownloadButton > button:hover {
-    background: #003F7A;
-    color: #ffffff;
-}
-
-/* ════════════════════════════════════════════
-   EXPANDERS
-════════════════════════════════════════════ */
-[data-testid="stExpander"] {
-    border: 1px solid #D1DCE8 !important;
-    border-radius: 10px !important;
+/* ── Tarjeta de archivo persistente ── */
+.persist-card {
     background: #ffffff;
-    margin-bottom: 8px;
+    border-radius: 12px;
+    border-left: 4px solid #00A651;
+    padding: 12px 16px;
+    margin: 8px 0 10px;
+    box-shadow: 0 1px 4px rgba(0,0,0,.06);
 }
-[data-testid="stExpander"] summary {
-    font-weight: 600;
-    font-size: .86rem;
+.persist-card .pc-label {
+    font-size: .62rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: #00A651;
+    margin-bottom: 3px;
+}
+.persist-card .pc-filename {
+    font-size: .82rem;
+    font-weight: 700;
     color: #1A2E44;
-    padding: 10px 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
+.persist-card .pc-meta {
+    font-size: .68rem;
+    color: #7A96AF;
+    margin-top: 2px;
+    line-height: 1.5;
+}
+
+.sec { font-size: .9rem; font-weight: 700; color: #005CA9; border-bottom: 2px solid #D1DCE8; padding-bottom: 6px; margin: 22px 0 12px; letter-spacing: .01em; display: flex; align-items: center; gap: 6px; }
+
+[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; border: 1px solid #D1DCE8; box-shadow: 0 1px 4px rgba(0,0,0,.04); }
+
+.stDownloadButton > button { background: #005CA9; color: #ffffff; border: none; border-radius: 8px; font-size: .78rem; font-weight: 600; padding: 8px 14px; width: 100%; transition: background .15s ease; }
+.stDownloadButton > button:hover { background: #003F7A; color: #ffffff; }
+
+[data-testid="stExpander"] { border: 1px solid #D1DCE8 !important; border-radius: 10px !important; background: #ffffff; margin-bottom: 8px; }
+[data-testid="stExpander"] summary { font-weight: 600; font-size: .86rem; color: #1A2E44; padding: 10px 14px; }
 [data-testid="stExpander"] summary:hover { background: #F0F6FF; }
 
-/* ════════════════════════════════════════════
-   BADGES DE FUENTE (inline HTML)
-════════════════════════════════════════════ */
 .badge-ariba  { background:#E8F2FB; color:#005CA9; border-radius:99px; padding:2px 9px; font-size:.67rem; font-weight:700; }
 .badge-cons   { background:#F0EAFF; color:#6C3FC4; border-radius:99px; padding:2px 9px; font-size:.67rem; font-weight:700; }
 .badge-ambos  { background:#E6F9EE; color:#00703A; border-radius:99px; padding:2px 9px; font-size:.67rem; font-weight:700; }
 
-/* ════════════════════════════════════════════
-   SPINNER / SPINNER TEXT
-════════════════════════════════════════════ */
 .stSpinner > div { border-top-color: #005CA9 !important; }
 
-/* ════════════════════════════════════════════
-   HIDE DEFAULT STREAMLIT CHROME
-════════════════════════════════════════════ */
 #MainMenu, footer, header { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
@@ -295,7 +317,6 @@ button[kind="headerNoPadding"],
 # ──────────────────────────────────────────────────────────────
 # LISTAS OFICIALES DE COMPRADORES
 # ──────────────────────────────────────────────────────────────
-
 ESTRATEGICOS = {
     "Bárbara García", "BPO", "Claudio Berrios",
     "Denisse Andrea Gonzalez Terrile", "Jorge Alfonso Urrutia Carillo",
@@ -303,12 +324,10 @@ ESTRATEGICOS = {
     "Juan Figueroa", "Magdalena Farias", "Martina Fuentes",
     "Patricio Espinoza", "Viviana Grandón",
 }
-
 TACTICOS = {
     "BPO", "Dayana Dávila", "Joseph España",
     "Leonardo Nacarate", "Patricio Espinoza",
 }
-
 TODOS_COMPRADORES = ESTRATEGICOS | TACTICOS
 
 PIVOT_A_CANON = {
@@ -328,9 +347,6 @@ PIVOT_A_CANON = {
     "dayana davila":                       "Dayana Dávila",
 }
 
-# ──────────────────────────────────────────────────────────────
-# MAPEO DE COLUMNAS
-# ──────────────────────────────────────────────────────────────
 PIVOT_COL_MAP = {
     "ID de contrato":                          "id",
     "Proyecto - Nombre del proyecto":          "nombre_proyecto",
@@ -347,7 +363,6 @@ PIVOT_COL_MAP = {
     "Aplica Garantía":                         "garantia_ariba",
     "sum(Importe Monto total Contrato)":       "monto_total",
 }
-
 CONS_COL_MAP = {
     "Contrato Ariba":                          "id",
     "Comprador Estratégico":                   "comprador_estrat",
@@ -369,7 +384,6 @@ CONS_COL_MAP = {
 # ──────────────────────────────────────────────────────────────
 # UTILIDADES
 # ──────────────────────────────────────────────────────────────
-
 def norm(v) -> str:
     return str(v).strip().lower() if pd.notna(v) and str(v).strip() not in ("", "nan") else ""
 
@@ -425,7 +439,6 @@ def fmt_m(v: float) -> str:
     if v >= 1_000:         return f"${v/1_000:.0f}K"
     return f"${v:.0f}"
 
-# ── Paleta Softys para gráficos ──
 COL_RIESGO = {
     "BAJO 🟢":    "#00A651",
     "MEDIO 🟡":   "#F59E0B",
@@ -455,9 +468,8 @@ FG_SYNC = {
 }
 
 # ──────────────────────────────────────────────────────────────
-# CARGA Y TRANSFORMACIÓN
+# CARGA Y TRANSFORMACIÓN (con cache por hash MD5)
 # ──────────────────────────────────────────────────────────────
-
 def detectar_header(content: bytes) -> int:
     df_scan = pd.read_excel(BytesIO(content), sheet_name="Data",
                              header=None, nrows=25, engine="openpyxl")
@@ -474,34 +486,27 @@ def cargar_pivot(fhash: str, content: bytes) -> pd.DataFrame:
     df = df[~df["Estado del contrato"].astype(str).str.lower().str.strip().isin(["cerrado","cerrados"])]
     df = df.rename(columns={k: v for k, v in PIVOT_COL_MAP.items() if k in df.columns})
     df["id"] = df["id"].astype(str).str.strip()
-
     for rw, pr in [("fecha_inicio_raw","fecha_inicio"),("fecha_termino_raw","fecha_termino")]:
         if rw in df.columns:
             df[pr] = df[rw].apply(parse_fecha)
-
     df["comprador_canon"] = df["propietario_raw"].apply(canon) if "propietario_raw" in df.columns else "Sin asignar"
     df["es_oficial"]      = df["comprador_canon"].apply(es_comprador_oficial)
     df["tipo_comprador"]  = df["comprador_canon"].apply(tipo_comprador)
-
     hoy = pd.Timestamp.today().normalize()
     df["dias_venc"] = (df["fecha_termino"] - hoy).dt.days if "fecha_termino" in df.columns else None
-
     def _indef(row):
         if norm(row.get("indefinido_raw","")) in ("sí","si","yes","1","true","indefinido"): return True
         ft = row.get("fecha_termino")
         return pd.notna(ft) and isinstance(ft, pd.Timestamp) and ft.year > 2100
-
     df["es_indefinido"] = df.apply(_indef, axis=1)
     df["riesgo"]        = df.apply(lambda r: calcular_riesgo(
         str(r.get("estado_ariba","")), r.get("dias_venc"), r.get("es_indefinido",False)), axis=1)
     df["tiene_garantia"] = df["garantia_ariba"].apply(
         lambda v: norm(v) in ("sí","si","yes")) if "garantia_ariba" in df.columns else False
-
     if "monto_total" in df.columns:
         df["monto_total"] = pd.to_numeric(df["monto_total"], errors="coerce").fillna(0)
     if "fecha_inicio" in df.columns:
         df["anio_inicio"] = df["fecha_inicio"].dt.year
-
     df["fuente"] = "Ariba"
     return df[df["id"].notna() & (df["id"] != "nan") & (df["id"] != "")].reset_index(drop=True)
 
@@ -525,84 +530,62 @@ def cargar_consolidado(fhash: str, content: bytes) -> pd.DataFrame:
 # ──────────────────────────────────────────────────────────────
 # UNIVERSO UNIFICADO: FULL OUTER JOIN Pivot + Consolidado
 # ──────────────────────────────────────────────────────────────
-
 def construir_universo(df_p: pd.DataFrame, df_c: pd.DataFrame | None) -> pd.DataFrame:
     if df_c is None:
         return df_p.copy()
-
     ids_ariba = set(df_p["id"].astype(str))
     ids_cons  = set(df_c["id"].astype(str))
-
     df_merged = df_p.merge(df_c, on="id", how="left", suffixes=("","_c"))
     df_merged.loc[df_merged["id"].isin(ids_cons), "fuente"] = "Ambos"
-
     ids_solo_cons = ids_cons - ids_ariba
     if ids_solo_cons:
         df_solo = df_c[df_c["id"].isin(ids_solo_cons)].copy()
-
-        df_solo["fuente"]       = "Solo Consolidado"
-        df_solo["estado_ariba"] = df_solo.get("estado_cons_ariba", pd.Series(dtype=str))
-        df_solo["proveedor"]    = df_solo.get("proveedor_cons",     pd.Series(dtype=str))
-        df_solo["fecha_termino"]= df_solo.get("fecha_termino_cons", pd.Series(dtype="datetime64[ns]"))
+        df_solo["fuente"]        = "Solo Consolidado"
+        df_solo["estado_ariba"]  = df_solo.get("estado_cons_ariba", pd.Series(dtype=str))
+        df_solo["proveedor"]     = df_solo.get("proveedor_cons",     pd.Series(dtype=str))
+        df_solo["fecha_termino"] = df_solo.get("fecha_termino_cons", pd.Series(dtype="datetime64[ns]"))
         df_solo["tiene_garantia"] = df_solo.get("garantia_cons", pd.Series(dtype=str)).apply(
             lambda v: norm(v) in ("sí","si","yes","aplica","true"))
         df_solo["indefinido_raw"] = df_solo.get("indefinido_cons", pd.Series(dtype=str))
-        df_solo["monto_total"]  = pd.to_numeric(
+        df_solo["monto_total"]   = pd.to_numeric(
             df_solo.get("monto_garantia", pd.Series(dtype=float)), errors="coerce").fillna(0)
-
         hoy = pd.Timestamp.today().normalize()
         df_solo["dias_venc"] = (df_solo["fecha_termino"] - hoy).dt.days
-
         def _indef_cons(row):
-            if norm(row.get("indefinido_raw","")) in ("sí","si","yes","1","true","indefinido","x"):
-                return True
+            if norm(row.get("indefinido_raw","")) in ("sí","si","yes","1","true","indefinido","x"): return True
             ft = row.get("fecha_termino")
             return pd.notna(ft) and isinstance(ft, pd.Timestamp) and ft.year > 2100
         df_solo["es_indefinido"] = df_solo.apply(_indef_cons, axis=1)
-
         df_solo["riesgo"] = df_solo.apply(lambda r: calcular_riesgo(
             str(r.get("estado_ariba","")), r.get("dias_venc"), r.get("es_indefinido",False)), axis=1)
-
         def _comp_cons(row):
             ce = str(row.get("comprador_estrat","")).strip()
             ct = str(row.get("comprador_tact","")).strip()
             if ce and ce.lower() not in ("nan",""):  return canon(ce)
             if ct and ct.lower() not in ("nan",""):  return canon(ct)
             return "Sin asignar"
-
         df_solo["comprador_canon"] = df_solo.apply(_comp_cons, axis=1)
         df_solo["es_oficial"]      = df_solo["comprador_canon"].apply(es_comprador_oficial)
         df_solo["tipo_comprador"]  = df_solo["comprador_canon"].apply(tipo_comprador)
         df_solo["propietario_raw"] = df_solo["comprador_canon"]
-
         cols_comunes = [c for c in df_merged.columns if c in df_solo.columns]
         df_merged = pd.concat([df_merged, df_solo[cols_comunes]], ignore_index=True)
-
     return df_merged.reset_index(drop=True)
 
 
-# ──────────────────────────────────────────────────────────────
-# MOTOR DE COMPARACIÓN
-# ──────────────────────────────────────────────────────────────
-
 def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
     merged = df_p.merge(df_c, on="id", how="outer", suffixes=("","_c"), indicator=True)
-
     merged["es_nuevo_ariba"] = merged["_merge"] == "left_only"
     merged["es_solo_cons"]   = merged["_merge"] == "right_only"
-
     def _dif_comprador(r):
         if r["es_nuevo_ariba"] or r["es_solo_cons"]: return False
         comp_pivot = str(r.get("propietario_raw","")).strip().lower()
         comp_cons  = str(r.get("comprador_estrat", r.get("comprador_tact",""))).strip().lower()
         return comp_pivot and comp_cons and comp_pivot != comp_cons
-
     merged["dif_comprador"] = merged.apply(_dif_comprador, axis=1)
-
     merged["dif_estado"] = merged.apply(
         lambda r: not r["es_nuevo_ariba"] and not r["es_solo_cons"] and
                   norm(r.get("estado_ariba","")) != norm(r.get("estado_cons_ariba","")), axis=1)
-
     def _dif_fecha(r):
         if r["es_nuevo_ariba"] or r["es_solo_cons"]: return False
         fp, fc = r.get("fecha_termino"), r.get("fecha_termino_cons")
@@ -610,15 +593,12 @@ def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
         if not (isinstance(fp, pd.Timestamp) and isinstance(fc, pd.Timestamp)): return False
         return abs((fp - fc).days) > 1
     merged["dif_fecha"] = merged.apply(_dif_fecha, axis=1)
-
     merged["dif_proveedor"] = merged.apply(
         lambda r: not r["es_nuevo_ariba"] and not r["es_solo_cons"] and
                   norm(r.get("proveedor","")) != norm(r.get("proveedor_cons","")), axis=1)
-
     merged["dif_garantia"] = merged.apply(
         lambda r: not r["es_nuevo_ariba"] and not r["es_solo_cons"] and
                   norm(r.get("garantia_ariba","")) != norm(r.get("garantia_cons","")), axis=1)
-
     def _status(r):
         if r["es_solo_cons"]:                        return "SOLO CONSOLIDADO"
         if r["es_nuevo_ariba"]:                      return "NUEVO EN ARIBA"
@@ -626,7 +606,6 @@ def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
         if r["dif_proveedor"] or r["dif_garantia"]:  return "REVISAR"
         return "OK"
     merged["sync_status"] = merged.apply(_status, axis=1)
-
     def _cambios(r):
         if r["es_solo_cons"]:
             comp = r.get("comprador_estrat","") or r.get("comprador_tact","") or "—"
@@ -650,7 +629,6 @@ def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
             msgs.append(f"🔒 Garantía: Ariba=«{r.get('garantia_ariba','—')}» / Consolidado=«{r.get('garantia_cons','—')}»")
         return " | ".join(msgs) if msgs else "✅ Sincronizado"
     merged["cambios"] = merged.apply(_cambios, axis=1)
-
     def _comp_merged(r):
         if r.get("es_solo_cons"):
             ce = str(r.get("comprador_estrat","")).strip()
@@ -666,12 +644,13 @@ def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
         raw = r.get("propietario_raw","")
         return canon(raw) if raw else "Sin asignar"
     merged["comprador_canon"] = merged.apply(_comp_merged, axis=1)
-
     return merged
 
-# ──────────────────────────────────────────────────────────────
-# SIDEBAR
-# ──────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════
+# ▶ BLOQUE 2: SIDEBAR — Gestión de archivos persistentes
+#   Reemplaza el bloque "with st.sidebar:" original
+# ══════════════════════════════════════════════════════════════
 
 with st.sidebar:
     # Logo / header Softys
@@ -693,27 +672,156 @@ with st.sidebar:
     <div style="height:8px"></div>
     """, unsafe_allow_html=True)
 
-    st.markdown('<div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:rgba(232,242,251,0.6);margin-bottom:6px;">📁 Pivot Ariba <span style="color:#7DD3FC;">(obligatorio)</span></div>', unsafe_allow_html=True)
-    up_pivot = st.file_uploader("Pivot", type=["xlsx","xls"], key="piv", label_visibility="collapsed")
-    st.caption("Descarga directa de SAP Ariba Analysis")
+    # ── PIVOT: leer estado persistente ────────────────────────
+    piv_bytes_persist, piv_meta = leer_pivot_persistente()
+    cons_bytes_persist, cons_meta = leer_cons_persistente()
 
-    st.markdown('<div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:rgba(232,242,251,0.6);margin-bottom:6px;margin-top:12px;">📄 Consolidado Drive <span style="color:rgba(232,242,251,0.5);">(opcional)</span></div>', unsafe_allow_html=True)
-    up_cons = st.file_uploader("Consolidado", type=["xlsx","xls"], key="con", label_visibility="collapsed")
-    st.caption("Archivo del SharePoint")
+    # ─── Sección Pivot ────────────────────────────────────────
+    st.markdown('<div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:rgba(232,242,251,0.6);margin-bottom:6px;">📁 Pivot Ariba <span style="color:#7DD3FC;">(obligatorio)</span></div>', unsafe_allow_html=True)
+
+    if piv_bytes_persist and piv_meta:
+        # Mostrar info del archivo guardado
+        ts_up  = piv_meta.get("uploaded_at","—")
+        size_s = _fmt_size(piv_meta.get("size_bytes",0))
+        fname  = piv_meta.get("filename","—")
+        by_s   = piv_meta.get("uploaded_by","—")
+        st.markdown(f"""
+        <div style="background:rgba(0,166,81,0.15);border-radius:10px;border-left:3px solid #00A651;
+                    padding:10px 12px;margin-bottom:8px;">
+          <div style="font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;
+                      color:#7DEFA3;margin-bottom:2px;">✅ Archivo guardado en servidor</div>
+          <div style="font-size:.78rem;font-weight:700;color:#ffffff;word-break:break-all;">{fname}</div>
+          <div style="font-size:.65rem;color:rgba(232,242,251,0.65);margin-top:3px;line-height:1.6;">
+            📅 {ts_up}<br>
+            💾 {size_s} &nbsp;·&nbsp; 🔑 MD5 OK<br>
+            👤 sesión {by_s}
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Mostrar uploader para reemplazar
+        with st.expander("🔄 Reemplazar Pivot", expanded=False):
+            st.caption("Sube un nuevo archivo para sobrescribir el actual en el servidor.")
+            up_pivot_new = st.file_uploader("Nuevo Pivot", type=["xlsx","xls"],
+                                             key="piv_replace", label_visibility="collapsed")
+            if up_pivot_new:
+                up_pivot_new.seek(0)
+                new_bytes = up_pivot_new.read()
+                new_hash  = _md5(new_bytes)
+                if new_hash != piv_meta.get("hash_md5",""):
+                    if st.button("💾 Guardar nuevo Pivot", key="btn_save_piv"):
+                        with st.spinner("Guardando…"):
+                            guardar_pivot_persistente(new_bytes, up_pivot_new.name, _session_id())
+                        st.success("✅ Pivot actualizado. Recargando…")
+                        st.rerun()
+                else:
+                    st.info("ℹ️ El archivo subido es idéntico al guardado (mismo MD5).")
+
+        col_del_piv, _ = st.columns([1,1])
+        with col_del_piv:
+            if st.button("🗑️ Eliminar Pivot", key="btn_del_piv", help="Elimina el archivo del servidor"):
+                eliminar_pivot_persistente()
+                st.warning("Pivot eliminado del servidor.")
+                st.rerun()
+
+        # Usar bytes del servidor
+        piv_bytes = piv_bytes_persist
+        up_pivot  = None   # No hay uploader activo
+
+    else:
+        # No existe archivo persistente → uploader normal
+        up_pivot = st.file_uploader("Pivot", type=["xlsx","xls"],
+                                     key="piv", label_visibility="collapsed")
+        st.caption("Descarga directa de SAP Ariba Analysis")
+        piv_bytes = None
+        if up_pivot:
+            up_pivot.seek(0)
+            piv_bytes = up_pivot.read()
+            # ─── PRIMERA SUBIDA: guardar automáticamente ────
+            if st.button("💾 Guardar en servidor", key="btn_save_piv_first"):
+                with st.spinner("Guardando Pivot en servidor…"):
+                    guardar_pivot_persistente(piv_bytes, up_pivot.name, _session_id())
+                st.success("✅ Pivot guardado. La app cargará automáticamente desde ahora.")
+                st.rerun()
+            else:
+                st.caption("⚡ El archivo se usa en esta sesión. Guárdalo para que persista entre sesiones.")
+
+    # ─── Sección Consolidado ──────────────────────────────────
+    st.markdown('<div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:rgba(232,242,251,0.6);margin-bottom:6px;margin-top:14px;">📄 Consolidado Drive <span style="color:rgba(232,242,251,0.5);">(opcional)</span></div>', unsafe_allow_html=True)
+
+    if cons_bytes_persist and cons_meta:
+        ts_c   = cons_meta.get("uploaded_at","—")
+        size_c = _fmt_size(cons_meta.get("size_bytes",0))
+        fname_c = cons_meta.get("filename","—")
+        st.markdown(f"""
+        <div style="background:rgba(108,63,196,0.18);border-radius:10px;border-left:3px solid #9F7AEA;
+                    padding:10px 12px;margin-bottom:8px;">
+          <div style="font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;
+                      color:#C4B5FD;margin-bottom:2px;">✅ Consolidado guardado</div>
+          <div style="font-size:.78rem;font-weight:700;color:#ffffff;word-break:break-all;">{fname_c}</div>
+          <div style="font-size:.65rem;color:rgba(232,242,251,0.65);margin-top:3px;line-height:1.6;">
+            📅 {ts_c} &nbsp;·&nbsp; 💾 {size_c}
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.expander("🔄 Reemplazar Consolidado", expanded=False):
+            up_cons_new = st.file_uploader("Nuevo Consolidado", type=["xlsx","xls"],
+                                            key="con_replace", label_visibility="collapsed")
+            if up_cons_new:
+                up_cons_new.seek(0)
+                new_c_bytes = up_cons_new.read()
+                if _md5(new_c_bytes) != cons_meta.get("hash_md5",""):
+                    if st.button("💾 Guardar Consolidado", key="btn_save_cons"):
+                        with st.spinner("Guardando…"):
+                            guardar_cons_persistente(new_c_bytes, up_cons_new.name, _session_id())
+                        st.success("✅ Consolidado actualizado.")
+                        st.rerun()
+                else:
+                    st.info("ℹ️ Archivo idéntico al guardado.")
+
+        col_del_cons, _ = st.columns([1,1])
+        with col_del_cons:
+            if st.button("🗑️ Eliminar Consolidado", key="btn_del_cons"):
+                eliminar_cons_persistente()
+                st.warning("Consolidado eliminado.")
+                st.rerun()
+
+        cons_bytes = cons_bytes_persist
+        up_cons    = None
+
+    else:
+        up_cons = st.file_uploader("Consolidado", type=["xlsx","xls"],
+                                    key="con", label_visibility="collapsed")
+        st.caption("Archivo del SharePoint")
+        cons_bytes = None
+        if up_cons:
+            up_cons.seek(0)
+            cons_bytes = up_cons.read()
+            if st.button("💾 Guardar Consolidado en servidor", key="btn_save_cons_first"):
+                with st.spinner("Guardando Consolidado…"):
+                    guardar_cons_persistente(cons_bytes, up_cons.name, _session_id())
+                st.success("✅ Consolidado guardado.")
+                st.rerun()
+            else:
+                st.caption("⚡ Usado solo en esta sesión. Guárdalo para persistir.")
 
     st.markdown("---")
     filtros_ph = st.empty()
 
-# ──────────────────────────────────────────────────────────────
-# PANTALLA BIENVENIDA
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# ▶ BLOQUE 3: PANTALLA DE BIENVENIDA — sin cambios estructurales
+# ══════════════════════════════════════════════════════════════
 
-if not up_pivot:
+# Determinar si hay bytes disponibles (persistente o upload en sesión)
+_tiene_pivot = (piv_bytes is not None) or (piv_bytes_persist is not None)
+_bytes_pivot  = piv_bytes if piv_bytes is not None else piv_bytes_persist
+
+if not _tiene_pivot or _bytes_pivot is None:
     st.markdown("""
     <div style="display:flex;flex-direction:column;align-items:center;
          justify-content:center;padding:70px 30px 40px;text-align:center;">
 
-      <!-- Logo pill -->
       <div style="background:linear-gradient(135deg,#005CA9,#0072CE);
                   border-radius:16px;padding:16px 24px;margin-bottom:24px;
                   box-shadow:0 8px 24px rgba(0,92,169,.25);">
@@ -730,35 +838,30 @@ if not up_pivot:
       <p style="color:#5A7490;max-width:500px;line-height:1.7;margin-bottom:30px;font-size:.93rem;">
         Sube el <strong style="color:#005CA9;">Pivot de Ariba</strong> para ver indicadores.<br>
         Agrega el <strong style="color:#6C3FC4;">Consolidado del Drive</strong> para detectar
-        qué está desactualizado y quién debe actualizarlo —
-        incluyendo contratos gestionados directamente en el Consolidado.
+        qué está desactualizado y quién debe actualizarlo.
       </p>
 
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;max-width:680px;width:100%;">
         <div style="background:#ffffff;border-radius:12px;padding:16px 12px;
-                    border-top:3px solid #00A651;
-                    box-shadow:0 2px 8px rgba(0,0,0,.06);">
+                    border-top:3px solid #00A651;box-shadow:0 2px 8px rgba(0,0,0,.06);">
           <div style="font-size:1.5rem;">📊</div>
           <div style="font-weight:700;font-size:.8rem;color:#1A2E44;margin-top:7px;">KPIs automáticos</div>
           <div style="font-size:.72rem;color:#8FA3B8;margin-top:3px;">10 indicadores clave</div>
         </div>
         <div style="background:#ffffff;border-radius:12px;padding:16px 12px;
-                    border-top:3px solid #0072CE;
-                    box-shadow:0 2px 8px rgba(0,0,0,.06);">
+                    border-top:3px solid #0072CE;box-shadow:0 2px 8px rgba(0,0,0,.06);">
           <div style="font-size:1.5rem;">🔄</div>
           <div style="font-weight:700;font-size:.8rem;color:#1A2E44;margin-top:7px;">Sincronización</div>
           <div style="font-size:.72rem;color:#8FA3B8;margin-top:3px;">Campo a campo</div>
         </div>
         <div style="background:#ffffff;border-radius:12px;padding:16px 12px;
-                    border-top:3px solid #6C3FC4;
-                    box-shadow:0 2px 8px rgba(0,0,0,.06);">
+                    border-top:3px solid #6C3FC4;box-shadow:0 2px 8px rgba(0,0,0,.06);">
           <div style="font-size:1.5rem;">📂</div>
           <div style="font-weight:700;font-size:.8rem;color:#1A2E44;margin-top:7px;">Contratos Drive</div>
           <div style="font-size:.72rem;color:#8FA3B8;margin-top:3px;">Visibles sin Ariba</div>
         </div>
         <div style="background:#ffffff;border-radius:12px;padding:16px 12px;
-                    border-top:3px solid #F59E0B;
-                    box-shadow:0 2px 8px rgba(0,0,0,.06);">
+                    border-top:3px solid #F59E0B;box-shadow:0 2px 8px rgba(0,0,0,.06);">
           <div style="font-size:1.5rem;">👤</div>
           <div style="font-weight:700;font-size:.8rem;color:#1A2E44;margin-top:7px;">Por comprador</div>
           <div style="font-size:.72rem;color:#8FA3B8;margin-top:3px;">Alertas personalizadas</div>
@@ -774,22 +877,21 @@ if not up_pivot:
     st.stop()
 
 # ──────────────────────────────────────────────────────────────
-# CARGA DE DATOS
+# CARGA DE DATOS  (usa _bytes_pivot en lugar de up_pivot)
 # ──────────────────────────────────────────────────────────────
 
-up_pivot.seek(0); piv_bytes = up_pivot.read()
 with st.spinner("Procesando Pivot de Ariba..."):
     try:
-        df_piv = cargar_pivot(hashlib.md5(piv_bytes).hexdigest(), piv_bytes)
+        df_piv = cargar_pivot(_md5(_bytes_pivot), _bytes_pivot)
     except Exception as e:
         st.error(f"❌ Error al leer el Pivot: {e}"); st.stop()
 
 df_cons_raw = None
-if up_cons:
-    up_cons.seek(0); cons_bytes = up_cons.read()
+_bytes_cons = cons_bytes if cons_bytes is not None else cons_bytes_persist
+if _bytes_cons:
     with st.spinner("Cargando Consolidado..."):
         try:
-            df_cons_raw = cargar_consolidado(hashlib.md5(cons_bytes).hexdigest(), cons_bytes)
+            df_cons_raw = cargar_consolidado(_md5(_bytes_cons), _bytes_cons)
         except Exception as e:
             st.warning(f"⚠️ No se pudo leer el Consolidado: {e}")
 
@@ -797,8 +899,14 @@ with st.spinner("Unificando fuentes..."):
     df_universo = construir_universo(df_piv, df_cons_raw)
 
 # ──────────────────────────────────────────────────────────────
-# FILTROS
+# FILTROS  (sin cambios)
 # ──────────────────────────────────────────────────────────────
+
+# Nombre de archivo para mostrar en sidebar
+_piv_name = (piv_meta.get("filename","pivot.xlsx") if piv_meta
+             else (up_pivot.name if up_pivot else "pivot.xlsx"))
+_cons_name = (cons_meta.get("filename","consolidado.xlsx") if cons_meta
+              else (up_cons.name if up_cons else "consolidado.xlsx"))
 
 with st.sidebar:
     with filtros_ph.container():
@@ -811,7 +919,6 @@ with st.sidebar:
         f_riesgo  = st.selectbox("🚦 Riesgo", ["Todos"] + sorted(df_universo["riesgo"].dropna().unique()))
         f_tipo    = st.selectbox("👥 Tipo comprador",
                                   ["Todos","Estratégico","Táctico","Estratégico + Táctico","No registrado"])
-
         compradores_lista = sorted(df_universo["comprador_canon"].dropna().unique().tolist())
         f_comp    = st.selectbox("👤 Comprador", ["Todos"] + compradores_lista)
         f_estado  = st.selectbox("📄 Estado Ariba",
@@ -821,9 +928,11 @@ with st.sidebar:
 
         st.markdown("---")
         n_solo_cons = (df_universo["fuente"] == "Solo Consolidado").sum()
-        st.caption(f"📁 {up_pivot.name}\n{len(df_piv):,} contratos activos en Ariba")
+        # Mostrar info de origen
+        piv_ts_label = f"\n📅 {piv_meta['uploaded_at']}" if piv_meta else ""
+        st.caption(f"📁 {_piv_name}{piv_ts_label}\n{len(df_piv):,} contratos activos en Ariba")
         if df_cons_raw is not None:
-            st.caption(f"📄 {up_cons.name}\n{len(df_cons_raw):,} filas · {n_solo_cons:,} solo en Drive")
+            st.caption(f"📄 {_cons_name}\n{len(df_cons_raw):,} filas · {n_solo_cons:,} solo en Drive")
 
 # Aplicar filtros
 df = df_universo.copy()
@@ -851,15 +960,15 @@ if df_cons_raw is not None:
     pills.append('<span style="background:#EAF2FB;color:#005CA9;border-radius:99px;padding:3px 11px;font-size:.68rem;font-weight:700;margin-left:8px;border:1px solid #B8D4EF;">🔄 Sincronización activa</span>')
 if n_solo_cons_vis > 0:
     pills.append(f'<span style="background:#F0EAFF;color:#6C3FC4;border-radius:99px;padding:3px 11px;font-size:.68rem;font-weight:700;margin-left:5px;border:1px solid #D4C5F0;">📂 {n_solo_cons_vis} solo en Drive</span>')
+# Badge de persistencia activa
+pills.append('<span style="background:#F0FDF4;color:#00703A;border-radius:99px;padding:3px 11px;font-size:.68rem;font-weight:700;margin-left:5px;border:1px solid #A7F3D0;">💾 Datos persistentes</span>')
 
 st.markdown(f"""
 <div style="display:flex;justify-content:space-between;align-items:flex-end;
             margin-bottom:16px;padding-bottom:14px;border-bottom:2px solid #D1DCE8;">
   <div>
     <div style="font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;
-                color:#0072CE;margin-bottom:4px;">
-      Compras Estratégicas · Chile
-    </div>
+                color:#0072CE;margin-bottom:4px;">Compras Estratégicas · Chile</div>
     <h1 style="font-size:1.35rem;font-weight:800;color:#1A2E44;margin:0;line-height:1.2;">
       Gestión de Contratos{''.join(pills)}
     </h1>
@@ -878,7 +987,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────
-# TABS
+# TABS (sin cambios en lógica de negocio)
 # ──────────────────────────────────────────────────────────────
 
 if df_cons_raw is not None:
@@ -891,16 +1000,12 @@ else:
         "🏢 Proveedores", "🔒 Garantías", "🔍 Explorador"])
     tab_sync = None
 
-# ── Función helper para gráficos Plotly con paleta Softys ──
 def _layout(fig, title="", h=275):
     fig.update_layout(
         title=dict(text=title, font=dict(size=12, color="#1A2E44", family="Inter"), x=0.01),
-        paper_bgcolor="#ffffff",
-        plot_bgcolor="#ffffff",
+        paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
         font=dict(family="Inter", size=10, color="#2D3748"),
-        margin=dict(t=36 if title else 12, b=10, l=8, r=8),
-        height=h,
-    )
+        margin=dict(t=36 if title else 12, b=10, l=8, r=8), height=h)
     return fig
 
 # ══════════════════════════════════════════════
@@ -920,58 +1025,28 @@ with tab_kpi:
 
     st.markdown(f"""
     <div class="kpi-row">
-      <div class="kpi">
-        <div class="kpi-lbl">📋 Total contratos</div>
-        <div class="kpi-val">{total:,}</div>
-        <div class="kpi-sub">Ariba + Drive unificados</div>
-      </div>
-      <div class="kpi g">
-        <div class="kpi-lbl">✅ Vigentes</div>
-        <div class="kpi-val">{bajo:,}</div>
-        <div class="kpi-sub">{pct_v} del total</div>
-      </div>
-      <div class="kpi y">
-        <div class="kpi-lbl">⚠️ Riesgo medio</div>
-        <div class="kpi-val">{medio:,}</div>
-        <div class="kpi-sub">vencen ≤ 60 días</div>
-      </div>
-      <div class="kpi r">
-        <div class="kpi-lbl">🚨 Riesgo alto</div>
-        <div class="kpi-val">{alto:,}</div>
-        <div class="kpi-sub">vencidos / cancelados</div>
-      </div>
-      <div class="kpi gr">
-        <div class="kpi-lbl">🔍 Por revisar</div>
-        <div class="kpi-val">{revisar:,}</div>
-        <div class="kpi-sub">borrador / sin fecha</div>
-      </div>
+      <div class="kpi"><div class="kpi-lbl">📋 Total contratos</div>
+        <div class="kpi-val">{total:,}</div><div class="kpi-sub">Ariba + Drive unificados</div></div>
+      <div class="kpi g"><div class="kpi-lbl">✅ Vigentes</div>
+        <div class="kpi-val">{bajo:,}</div><div class="kpi-sub">{pct_v} del total</div></div>
+      <div class="kpi y"><div class="kpi-lbl">⚠️ Riesgo medio</div>
+        <div class="kpi-val">{medio:,}</div><div class="kpi-sub">vencen ≤ 60 días</div></div>
+      <div class="kpi r"><div class="kpi-lbl">🚨 Riesgo alto</div>
+        <div class="kpi-val">{alto:,}</div><div class="kpi-sub">vencidos / cancelados</div></div>
+      <div class="kpi gr"><div class="kpi-lbl">🔍 Por revisar</div>
+        <div class="kpi-val">{revisar:,}</div><div class="kpi-sub">borrador / sin fecha</div></div>
     </div>
     <div class="kpi-row">
-      <div class="kpi p">
-        <div class="kpi-lbl">📂 Solo en Drive</div>
-        <div class="kpi-val">{n_sc:,}</div>
-        <div class="kpi-sub">no están en Ariba</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-lbl">♾️ Indefinidos</div>
-        <div class="kpi-val">{indef:,}</div>
-        <div class="kpi-sub">sin fecha de término</div>
-      </div>
-      <div class="kpi g">
-        <div class="kpi-lbl">🔒 Con garantía</div>
-        <div class="kpi-val">{gar:,}</div>
-        <div class="kpi-sub">aplica boleta</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-lbl">👤 Compradores</div>
-        <div class="kpi-val">{df["comprador_canon"].nunique():,}</div>
-        <div class="kpi-sub">propietarios únicos</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-lbl">💰 Monto total</div>
-        <div class="kpi-val">{fmt_m(monto)}</div>
-        <div class="kpi-sub">CLP contratos filtrados</div>
-      </div>
+      <div class="kpi p"><div class="kpi-lbl">📂 Solo en Drive</div>
+        <div class="kpi-val">{n_sc:,}</div><div class="kpi-sub">no están en Ariba</div></div>
+      <div class="kpi"><div class="kpi-lbl">♾️ Indefinidos</div>
+        <div class="kpi-val">{indef:,}</div><div class="kpi-sub">sin fecha de término</div></div>
+      <div class="kpi g"><div class="kpi-lbl">🔒 Con garantía</div>
+        <div class="kpi-val">{gar:,}</div><div class="kpi-sub">aplica boleta</div></div>
+      <div class="kpi"><div class="kpi-lbl">👤 Compradores</div>
+        <div class="kpi-val">{df["comprador_canon"].nunique():,}</div><div class="kpi-sub">propietarios únicos</div></div>
+      <div class="kpi"><div class="kpi-lbl">💰 Monto total</div>
+        <div class="kpi-val">{fmt_m(monto)}</div><div class="kpi-sub">CLP contratos filtrados</div></div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -980,7 +1055,7 @@ with tab_kpi:
         <div class="alert-card purple">
           <strong>📂 {n_sc} contratos registrados solo en el Consolidado del Drive</strong><br>
           Son gestionados directamente por los compradores y <em>no tienen correspondencia en Ariba</em>.
-          Están incluidos en todos los KPIs y filtros. Considera si deben subirse a SAP Ariba.
+          Están incluidos en todos los KPIs y filtros.
         </div>
         """, unsafe_allow_html=True)
 
@@ -991,8 +1066,7 @@ with tab_kpi:
             labels=d["r"], values=d["n"], hole=0.58,
             marker_colors=[COL_RIESGO.get(r,"#999") for r in d["r"]],
             marker_line=dict(color="#ffffff", width=2),
-            textinfo="percent+value",
-            textfont=dict(size=10, family="Inter"),
+            textinfo="percent+value", textfont=dict(size=10, family="Inter"),
             hovertemplate="<b>%{label}</b><br>%{value} contratos (%{percent})<extra></extra>"))
         fig.update_layout(
             annotations=[dict(text=f"<b>{total}</b>", x=0.5, y=0.5, font_size=18,
@@ -1106,13 +1180,11 @@ if tab_sync is not None:
             st.markdown(f"""
             <div class="alert-card purple">
               <strong>📂 {n_solo_c} contratos registrados solo en el Consolidado del Drive</strong><br>
-              Son gestionados directamente por los compradores. Se muestran en la lista de cada comprador
-              y en el Explorador. Si corresponde, deberían subirse a Ariba.
+              Se muestran en la lista de cada comprador y en el Explorador.
             </div>
             """, unsafe_allow_html=True)
 
-        st.markdown('<div class="sec">🔔 Alertas por comprador — qué debe actualizar cada uno</div>', unsafe_allow_html=True)
-
+        st.markdown('<div class="sec">🔔 Alertas por comprador</div>', unsafe_allow_html=True)
         problemas = df_cmp[df_cmp["sync_status"] != "OK"].copy()
         compradores_con_prob = sorted(problemas["comprador_canon"].dropna().unique())
 
@@ -1125,7 +1197,6 @@ if tab_sync is not None:
             for comp in (compradores_con_prob if f_sync_comp == "Todos los compradores" else [f_sync_comp]):
                 grp = df_prob_view[df_prob_view["comprador_canon"] == comp]
                 if grp.empty: continue
-
                 n_grp = len(grp)
                 n_d   = (grp["sync_status"] == "DESACTUALIZADO").sum()
                 n_n   = (grp["sync_status"] == "NUEVO EN ARIBA").sum()
@@ -1136,20 +1207,17 @@ if tab_sync is not None:
                 badge_tipo = (
                     f"<span style='background:#EAF2FB;color:#005CA9;border-radius:6px;padding:1px 8px;font-size:.67rem;margin-left:6px;font-weight:700;'>{tipo}</span>"
                     if es_of else
-                    "<span style='background:#FFFBEB;color:#78350F;border-radius:6px;padding:1px 8px;font-size:.67rem;margin-left:6px;font-weight:700;'>No registrado</span>"
-                )
-
+                    "<span style='background:#FFFBEB;color:#78350F;border-radius:6px;padding:1px 8px;font-size:.67rem;margin-left:6px;font-weight:700;'>No registrado</span>")
                 severity = "red" if n_d > 0 or n_n > 0 else ("purple" if n_sc2 > 0 else "yellow")
                 partes = []
-                if n_d:   partes.append(f"<strong>{n_d}</strong> desactualizados (estado/fecha diferente)")
-                if n_n:   partes.append(f"<strong>{n_n}</strong> contratos nuevos en Ariba sin registrar en Drive")
-                if n_sc2: partes.append(f"<strong>{n_sc2}</strong> contratos gestionados solo en Drive")
-                if n_r:   partes.append(f"<strong>{n_r}</strong> por revisar (proveedor/garantía)")
+                if n_d:   partes.append(f"<strong>{n_d}</strong> desactualizados")
+                if n_n:   partes.append(f"<strong>{n_n}</strong> nuevos en Ariba sin registrar en Drive")
+                if n_sc2: partes.append(f"<strong>{n_sc2}</strong> gestionados solo en Drive")
+                if n_r:   partes.append(f"<strong>{n_r}</strong> por revisar")
                 resumen_html = " &nbsp;·&nbsp; ".join(partes)
 
                 with st.expander(f"👤 {comp}{badge_tipo}  —  {n_grp} contrato(s) con diferencias", expanded=(n_d+n_n > 0)):
                     st.markdown(f'<div class="alert-card {severity}"><strong>Situación para {comp}:</strong><br>{resumen_html}</div>', unsafe_allow_html=True)
-
                     cols_det = [c for c in ["id","proveedor","proveedor_cons","estado_ariba","estado_cons_ariba",
                                              "fecha_termino","fecha_termino_cons","sync_status","cambios"] if c in grp.columns]
                     ren_det  = {"id":"Contrato","proveedor":"Proveedor (Ariba)","proveedor_cons":"Proveedor (Drive)",
@@ -1157,11 +1225,9 @@ if tab_sync is not None:
                                 "fecha_termino":"Fecha Ariba","fecha_termino_cons":"Fecha en Drive",
                                 "sync_status":"Estado Sync","cambios":"Detalle"}
                     tbl_det = grp[cols_det].rename(columns=ren_det)
-
                     def hl_sync_row(val):
                         bg = BG_SYNC.get(str(val),""); fg = FG_SYNC.get(str(val),"")
                         return f"background:{bg};color:{fg};font-weight:600" if bg else ""
-
                     st.dataframe(tbl_det.style.map(hl_sync_row, subset=["Estado Sync"] if "Estado Sync" in tbl_det.columns else []),
                                  use_container_width=True, height=min(300, 60 + len(grp)*38))
 
@@ -1190,7 +1256,6 @@ if tab_sync is not None:
                     "comprador_canon":"Comprador","estado_ariba":"Estado Ariba",
                     "estado_cons_ariba":"Estado Drive","fecha_termino":"Fecha Ariba",
                     "fecha_termino_cons":"Fecha Drive","sync_status":"Estado Sync","cambios":"Detalle"}
-
         e1,e2,e3,e4 = st.columns(4)
         with e1:
             pend = df_cmp[df_cmp["sync_status"] != "OK"][cols_exp].rename(columns=ren_exp)
@@ -1219,7 +1284,6 @@ with tab_comp:
       Los contratos se muestran desde <strong>ambas fuentes</strong>: Ariba y Consolidado del Drive.
       Los contratos gestionados solo en el Drive aparecen con badge
       <span class="badge-cons">📂 Solo Drive</span>.
-      Si un contrato tiene diferente comprador en cada archivo, se prioriza el del Consolidado.
     </div>
     """, unsafe_allow_html=True)
 
@@ -1243,14 +1307,14 @@ with tab_comp:
     st.plotly_chart(fig_c, use_container_width=True)
 
     resumen = df.groupby(["comprador_canon","tipo_comprador"]).agg(
-        Contratos        =("id","count"),
-        Solo_Drive       =("fuente", lambda x: (x=="Solo Consolidado").sum()),
-        Riesgo_Alto      =("riesgo", lambda x: (x=="ALTO 🔴").sum()),
-        Riesgo_Medio     =("riesgo", lambda x: (x=="MEDIO 🟡").sum()),
-        Vigentes         =("riesgo", lambda x: (x=="BAJO 🟢").sum()),
-        Indefinidos      =("es_indefinido","sum"),
-        Con_Garantia     =("tiene_garantia","sum"),
-        Monto            =("monto_total","sum") if "monto_total" in df.columns else ("id","count"),
+        Contratos    =("id","count"),
+        Solo_Drive   =("fuente", lambda x: (x=="Solo Consolidado").sum()),
+        Riesgo_Alto  =("riesgo", lambda x: (x=="ALTO 🔴").sum()),
+        Riesgo_Medio =("riesgo", lambda x: (x=="MEDIO 🟡").sum()),
+        Vigentes     =("riesgo", lambda x: (x=="BAJO 🟢").sum()),
+        Indefinidos  =("es_indefinido","sum"),
+        Con_Garantia =("tiene_garantia","sum"),
+        Monto        =("monto_total","sum") if "monto_total" in df.columns else ("id","count"),
     ).reset_index().sort_values("Contratos", ascending=False)
     resumen.rename(columns={"comprador_canon":"Comprador","tipo_comprador":"Tipo"}, inplace=True)
     if "Monto" in resumen.columns:
@@ -1268,15 +1332,13 @@ with tab_prov:
             top = df["proveedor"].value_counts().head(15).reset_index()
             top.columns = ["Proveedor","n"]; top["Proveedor"] = top["Proveedor"].str[:45]
             fig_p = px.bar(top, y="Proveedor", x="n", orientation="h",
-                title="Top 15 proveedores", color="n",
-                color_continuous_scale=[[0,"#B8D4EF"],[1,"#005CA9"]],
+                color="n", color_continuous_scale=[[0,"#B8D4EF"],[1,"#005CA9"]],
                 labels={"n":"","Proveedor":""})
             fig_p.update_traces(marker_line_width=0)
             fig_p.update_layout(
                 yaxis=dict(categoryorder="total ascending",tickfont=dict(size=9)),
-                xaxis=dict(gridcolor="#F0F4F8"),
-                coloraxis_showscale=False, paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
-                font=dict(family="Inter",size=10),
+                xaxis=dict(gridcolor="#F0F4F8"), coloraxis_showscale=False,
+                paper_bgcolor="#ffffff", plot_bgcolor="#ffffff", font=dict(family="Inter",size=10),
                 title=dict(text="Top 15 proveedores",font=dict(size=12,color="#1A2E44",family="Inter"),x=0.01),
                 height=380, margin=dict(t=38,b=10))
             st.plotly_chart(fig_p, use_container_width=True)
@@ -1292,9 +1354,8 @@ with tab_prov:
                 fig_pv.update_traces(marker_line_width=0)
                 fig_pv.update_layout(
                     yaxis=dict(categoryorder="total ascending",tickfont=dict(size=9)),
-                    xaxis=dict(gridcolor="#F0F4F8"),
-                    coloraxis_showscale=False, paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
-                    font=dict(family="Inter",size=10),
+                    xaxis=dict(gridcolor="#F0F4F8"), coloraxis_showscale=False,
+                    paper_bgcolor="#ffffff", plot_bgcolor="#ffffff", font=dict(family="Inter",size=10),
                     title=dict(text="Proveedores con más contratos vencidos",
                                font=dict(size=12,color="#1A2E44",family="Inter"),x=0.01),
                     height=380, margin=dict(t=38,b=10))
@@ -1330,9 +1391,8 @@ with tab_gar_tab:
             fig_gc2.update_traces(marker_line_width=0)
             fig_gc2.update_layout(
                 yaxis=dict(categoryorder="total ascending",tickfont=dict(size=9)),
-                xaxis=dict(gridcolor="#F0F4F8"),
-                coloraxis_showscale=False, paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
-                font=dict(family="Inter",size=10),
+                xaxis=dict(gridcolor="#F0F4F8"), coloraxis_showscale=False,
+                paper_bgcolor="#ffffff", plot_bgcolor="#ffffff", font=dict(family="Inter",size=10),
                 title=dict(text="Garantías por comprador",font=dict(size=12,color="#1A2E44",family="Inter"),x=0.01),
                 height=270, margin=dict(t=38,b=10))
             st.plotly_chart(fig_gc2, use_container_width=True)
@@ -1388,6 +1448,7 @@ with tab_exp:
 
     st.caption(f"Mostrando {len(df_exp):,} de {len(df):,} contratos · {len(df_universo):,} total en universo unificado")
 
+
 # ──────────────────────────────────────────────────────────────
 # EXPORTACIÓN GENERAL
 # ──────────────────────────────────────────────────────────────
@@ -1414,11 +1475,12 @@ with ex5:
     st.download_button("📂 Solo Drive", sc_exp.to_csv(index=False).encode("utf-8-sig"),
                        f"contratos_solo_drive_{ts}.csv", mime="text/csv")
 
+
 # ──────────────────────────────────────────────────────────────
 # DIAGNÓSTICO
 # ──────────────────────────────────────────────────────────────
 with st.expander("🔧 Diagnóstico técnico"):
-    d1,d2 = st.columns(2)
+    d1,d2,d3 = st.columns(3)
     with d1:
         fuente_counts = df_universo["fuente"].value_counts().to_dict()
         st.json({"Total Pivot (activos)":len(df_piv),
@@ -1435,8 +1497,21 @@ with st.expander("🔧 Diagnóstico técnico"):
                  "Riesgo MEDIO":int((df["riesgo"]=="MEDIO 🟡").sum()),
                  "Consolidado cargado":df_cons_raw is not None,
                  "Actualizado":datetime.now().strftime("%d/%m/%Y %H:%M")})
+    with d3:
+        # ── Info de persistencia ──
+        meta_diag = cargar_metadata()
+        st.json({
+            "Persistencia activa": os.path.exists(PERSIST_PIVOT),
+            "Directorio": PERSIST_DIR,
+            "Pivot en servidor": meta_diag.get("pivot", {}).get("filename","—"),
+            "Pivot subido": meta_diag.get("pivot", {}).get("uploaded_at","—"),
+            "Pivot MD5": meta_diag.get("pivot", {}).get("hash_md5","—")[:12] + "…" if meta_diag.get("pivot",{}).get("hash_md5") else "—",
+            "Consolidado en servidor": meta_diag.get("consolidado", {}).get("filename","—"),
+        })
+
 
 # ── Footer Softys ──────────────────────────────────────────────
+persist_label = "💾 Datos persistentes en servidor" if os.path.exists(PERSIST_PIVOT) else "⚡ Sin persistencia activa"
 st.markdown(f"""
 <div style="margin-top:32px;padding:14px 20px;
      background:linear-gradient(135deg,#003F7A,#005CA9);
@@ -1445,6 +1520,7 @@ st.markdown(f"""
     <span style="font-weight:800;color:#ffffff;">Softys Chile</span>
     &nbsp;·&nbsp; Compras Estratégicas
     &nbsp;·&nbsp; Fuentes: SAP Ariba + Consolidado Drive
+    &nbsp;·&nbsp; <span style="color:#7DEFA3;">{persist_label}</span>
   </div>
   <div style="color:rgba(232,242,251,0.6);font-size:.68rem;">
     {datetime.now().strftime('%d/%m/%Y %H:%M')}
