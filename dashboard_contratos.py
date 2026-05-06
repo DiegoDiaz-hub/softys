@@ -364,19 +364,17 @@ section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, #003F7A 0%, #005CA9 60%, #0072CE 100%);
     border-right: 1px solid #004f96;
 }
-/* ← MODIFICADO: Blanco puro para máximo contraste sobre fondo azul */
-section[data-testid="stSidebar"] * { color: #FFFFFF !important; }
+section[data-testid="stSidebar"] * { color: #E8F2FB !important; }
 section[data-testid="stSidebar"] .stSelectbox > div > div,
 section[data-testid="stSidebar"] .stMultiSelect > div > div {
-    background: rgba(255,255,255,0.15) !important;
-    border-color: rgba(255,255,255,0.35) !important;
-    color: #FFFFFF !important;
+    background: rgba(255,255,255,0.1) !important;
+    border-color: rgba(255,255,255,0.25) !important;
+    color: #ffffff !important;
     border-radius: 8px !important;
 }
-section[data-testid="stSidebar"] .stCheckbox label span { color: #FFFFFF !important; }
-section[data-testid="stSidebar"] hr { border-color: rgba(255,255,255,0.25); margin: 10px 0; }
-/* ← MODIFICADO: Caption más visible (85% opacidad en lugar de 70%) */
-section[data-testid="stSidebar"] .stCaption { color: rgba(255,255,255,0.85) !important; font-size:.72rem !important; }
+section[data-testid="stSidebar"] .stCheckbox label span { color: #E8F2FB !important; }
+section[data-testid="stSidebar"] hr { border-color: rgba(255,255,255,0.2); margin: 10px 0; }
+section[data-testid="stSidebar"] .stCaption { color: rgba(232,242,251,0.7) !important; font-size:.72rem !important; }
 
 button[kind="headerNoPadding"], [data-testid="collapsedControl"] {
     display: flex !important; visibility: visible !important; opacity: 1 !important;
@@ -384,7 +382,7 @@ button[kind="headerNoPadding"], [data-testid="collapsedControl"] {
     border: 1px solid #0072CE !important; border-left: none !important;
     padding: 6px 4px !important; z-index: 999999 !important;
 }
-[data-testid="collapsedControl"] svg { fill: #FFFFFF !important; color: #FFFFFF !important; visibility: visible !important; opacity: 1 !important; }
+[data-testid="collapsedControl"] svg { fill: #E8F2FB !important; color: #E8F2FB !important; visibility: visible !important; opacity: 1 !important; }
 [data-testid="collapsedControl"] { position: fixed !important; top: 50% !important; left: 0 !important; transform: translateY(-50%) !important; }
 
 .stApp { background: #F5F7FA; }
@@ -443,7 +441,7 @@ button[kind="headerNoPadding"], [data-testid="collapsedControl"] {
 }
 .persist-card .pc-meta {
     font-size: .68rem;
-    color: #5A7490; /* ← MODIFICADO: Gris más oscuro para mejor lectura */
+    color: #7A96AF;
     margin-top: 2px;
     line-height: 1.5;
 }
@@ -459,20 +457,15 @@ button[kind="headerNoPadding"], [data-testid="collapsedControl"] {
 [data-testid="stExpander"] summary { font-weight: 600; font-size: .86rem; color: #1A2E44; padding: 10px 14px; }
 [data-testid="stExpander"] summary:hover { background: #F0F6FF; }
 
-/* ← MODIFICADO: Badges con texto más oscuro para contraste sobre fondos claros */
-.badge-ariba  { background:#E8F2FB; color:#003F7A; border-radius:99px; padding:2px 9px; font-size:.67rem; font-weight:700; }
-.badge-cons   { background:#F0EAFF; color:#3B1A78; border-radius:99px; padding:2px 9px; font-size:.67rem; font-weight:700; }
-.badge-ambos  { background:#E6F9EE; color:#005F2A; border-radius:99px; padding:2px 9px; font-size:.67rem; font-weight:700; }
+.badge-ariba  { background:#E8F2FB; color:#005CA9; border-radius:99px; padding:2px 9px; font-size:.67rem; font-weight:700; }
+.badge-cons   { background:#F0EAFF; color:#6C3FC4; border-radius:99px; padding:2px 9px; font-size:.67rem; font-weight:700; }
+.badge-ambos  { background:#E6F9EE; color:#00703A; border-radius:99px; padding:2px 9px; font-size:.67rem; font-weight:700; }
 
 .stSpinner > div { border-top-color: #005CA9 !important; }
 
 #MainMenu, footer, header { visibility: hidden; }
-
-/* ← NUEVO: Sombra sutil para texto en sidebar (mejora legibilidad sin alterar diseño) */
-section[data-testid="stSidebar"] * {
-    text-shadow: 0 1px 1px rgba(0, 0, 0, 0.15);
-}
 </style>
+""", unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────
 # LISTAS OFICIALES DE COMPRADORES
