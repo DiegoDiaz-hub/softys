@@ -1,12 +1,13 @@
 """
 dashboard_pivot.py — Softys Chile · Compras Estratégicas
 =========================================================
-VERSIÓN CON PERSISTENCIA DE ARCHIVOS
-=====================================
-El Pivot de Ariba se guarda en ./data/pivot_persistente/ con metadata JSON.
-Cualquier sesión nueva carga automáticamente el último Pivot subido.
+VERSIÓN CON PERSISTENCIA + SINCRONIZACIÓN ONEDRIVE
+====================================================
+El Pivot de Ariba y el Consolidado se guardan en ./data/pivot_persistente/
+El Consolidado puede vincularse a un link de OneDrive/SharePoint para
+actualizarse con un clic desde la interfaz.
 
-Instalar:  pip install streamlit pandas plotly openpyxl
+Instalar:  pip install streamlit pandas plotly openpyxl requests
 Ejecutar:  streamlit run dashboard_pivot.py
 """
 
@@ -21,6 +22,7 @@ import openpyxl
 import warnings
 import json
 import os
+import re
 import shutil
 warnings.filterwarnings("ignore")
 
@@ -31,15 +33,14 @@ st.set_page_config(page_title="Gestión de Contratos · Softys", page_icon="📋
                    layout="wide", initial_sidebar_state="expanded")
 
 # ══════════════════════════════════════════════════════════════
-# ▶ BLOQUE 1: PERSISTENCIA DE ARCHIVOS
-#   Añadir justo debajo de set_page_config, antes del CSS
+# BLOQUE 1: PERSISTENCIA DE ARCHIVOS
 # ══════════════════════════════════════════════════════════════
 
-# ── Rutas de persistencia ─────────────────────────────────────
-PERSIST_DIR      = os.path.join(os.path.dirname(__file__), "data", "pivot_persistente")
-PERSIST_PIVOT    = os.path.join(PERSIST_DIR, "pivot_ariba.xlsx")
-PERSIST_CONS     = os.path.join(PERSIST_DIR, "consolidado_drive.xlsx")
-PERSIST_META     = os.path.join(PERSIST_DIR, "metadata.json")
+PERSIST_DIR   = os.path.join(os.path.dirname(__file__), "data", "pivot_persistente")
+PERSIST_PIVOT = os.path.join(PERSIST_DIR, "pivot_ariba.xlsx")
+PERSIST_CONS  = os.path.join(PERSIST_DIR, "consolidado_drive.xlsx")
+PERSIST_META  = os.path.join(PERSIST_DIR, "metadata.json")
+PERSIST_OD    = os.path.join(PERSIST_DIR, "onedrive_config.json")
 
 os.makedirs(PERSIST_DIR, exist_ok=True)
 
@@ -48,82 +49,24 @@ def _md5(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
 
 
-def guardar_pivot_persistente(content: bytes, filename: str, session_id: str = "desconocido") -> dict:
-    """
-    Guarda el Pivot en disco y actualiza metadata.json.
-    Devuelve el dict de metadata actualizado.
-    """
-    tmp_path = PERSIST_PIVOT + ".tmp"
-    try:
-        with open(tmp_path, "wb") as f:
-            f.write(content)
-        shutil.move(tmp_path, PERSIST_PIVOT)
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-
-    meta = cargar_metadata()
-    meta["pivot"] = {
-        "filename":   filename,
-        "hash_md5":   _md5(content),
-        "size_bytes": len(content),
-        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "uploaded_by": session_id,
-    }
-    _escribir_metadata(meta)
-    # Limpiar cache para forzar re-procesamiento
-    cargar_pivot.clear()
-    return meta
+def _fmt_size(size_bytes: int) -> str:
+    if size_bytes >= 1_048_576:
+        return f"{size_bytes/1_048_576:.1f} MB"
+    if size_bytes >= 1_024:
+        return f"{size_bytes/1_024:.0f} KB"
+    return f"{size_bytes} B"
 
 
-def guardar_cons_persistente(content: bytes, filename: str, session_id: str = "desconocido") -> dict:
-    """
-    Guarda el Consolidado en disco y actualiza metadata.json.
-    """
-    tmp_path = PERSIST_CONS + ".tmp"
-    try:
-        with open(tmp_path, "wb") as f:
-            f.write(content)
-        shutil.move(tmp_path, PERSIST_CONS)
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-
-    meta = cargar_metadata()
-    meta["consolidado"] = {
-        "filename":   filename,
-        "hash_md5":   _md5(content),
-        "size_bytes": len(content),
-        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "uploaded_by": session_id,
-    }
-    _escribir_metadata(meta)
-    cargar_consolidado.clear()
-    return meta
+def _session_id() -> str:
+    if "session_id" not in st.session_state:
+        import uuid
+        st.session_state["session_id"] = str(uuid.uuid4())[:8]
+    return st.session_state["session_id"]
 
 
-def eliminar_pivot_persistente():
-    """Elimina el Pivot persistente y su metadata."""
-    if os.path.exists(PERSIST_PIVOT):
-        os.remove(PERSIST_PIVOT)
-    meta = cargar_metadata()
-    meta.pop("pivot", None)
-    _escribir_metadata(meta)
-    cargar_pivot.clear()
-
-
-def eliminar_cons_persistente():
-    """Elimina el Consolidado persistente y su metadata."""
-    if os.path.exists(PERSIST_CONS):
-        os.remove(PERSIST_CONS)
-    meta = cargar_metadata()
-    meta.pop("consolidado", None)
-    _escribir_metadata(meta)
-    cargar_consolidado.clear()
-
+# ── Metadata general ─────────────────────────────────────────
 
 def cargar_metadata() -> dict:
-    """Lee metadata.json; devuelve {} si no existe o está corrupto."""
     if not os.path.exists(PERSIST_META):
         return {}
     try:
@@ -138,11 +81,40 @@ def _escribir_metadata(meta: dict):
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
 
-def leer_pivot_persistente() -> tuple[bytes | None, dict | None]:
-    """
-    Lee el archivo Pivot guardado en disco y valida su integridad via MD5.
-    Devuelve (bytes, meta_pivot) o (None, None) si no existe/está corrupto.
-    """
+# ── Pivot ─────────────────────────────────────────────────────
+
+def guardar_pivot_persistente(content: bytes, filename: str, session_id: str = "desconocido") -> dict:
+    tmp_path = PERSIST_PIVOT + ".tmp"
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(content)
+        shutil.move(tmp_path, PERSIST_PIVOT)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+    meta = cargar_metadata()
+    meta["pivot"] = {
+        "filename":    filename,
+        "hash_md5":    _md5(content),
+        "size_bytes":  len(content),
+        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "uploaded_by": session_id,
+    }
+    _escribir_metadata(meta)
+    cargar_pivot.clear()
+    return meta
+
+
+def eliminar_pivot_persistente():
+    if os.path.exists(PERSIST_PIVOT):
+        os.remove(PERSIST_PIVOT)
+    meta = cargar_metadata()
+    meta.pop("pivot", None)
+    _escribir_metadata(meta)
+    cargar_pivot.clear()
+
+
+def leer_pivot_persistente() -> tuple:
     meta = cargar_metadata()
     meta_pivot = meta.get("pivot")
     if not meta_pivot or not os.path.exists(PERSIST_PIVOT):
@@ -159,10 +131,40 @@ def leer_pivot_persistente() -> tuple[bytes | None, dict | None]:
         return None, None
 
 
-def leer_cons_persistente() -> tuple[bytes | None, dict | None]:
-    """
-    Lee el Consolidado guardado y valida su integridad.
-    """
+# ── Consolidado ───────────────────────────────────────────────
+
+def guardar_cons_persistente(content: bytes, filename: str, session_id: str = "desconocido") -> dict:
+    tmp_path = PERSIST_CONS + ".tmp"
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(content)
+        shutil.move(tmp_path, PERSIST_CONS)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+    meta = cargar_metadata()
+    meta["consolidado"] = {
+        "filename":    filename,
+        "hash_md5":    _md5(content),
+        "size_bytes":  len(content),
+        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "uploaded_by": session_id,
+    }
+    _escribir_metadata(meta)
+    cargar_consolidado.clear()
+    return meta
+
+
+def eliminar_cons_persistente():
+    if os.path.exists(PERSIST_CONS):
+        os.remove(PERSIST_CONS)
+    meta = cargar_metadata()
+    meta.pop("consolidado", None)
+    _escribir_metadata(meta)
+    cargar_consolidado.clear()
+
+
+def leer_cons_persistente() -> tuple:
     meta = cargar_metadata()
     meta_cons = meta.get("consolidado")
     if not meta_cons or not os.path.exists(PERSIST_CONS):
@@ -179,24 +181,176 @@ def leer_cons_persistente() -> tuple[bytes | None, dict | None]:
         return None, None
 
 
-def _fmt_size(size_bytes: int) -> str:
-    if size_bytes >= 1_048_576:
-        return f"{size_bytes/1_048_576:.1f} MB"
-    if size_bytes >= 1_024:
-        return f"{size_bytes/1_024:.0f} KB"
-    return f"{size_bytes} B"
+# ══════════════════════════════════════════════════════════════
+# BLOQUE 2: FUNCIONES ONEDRIVE
+# ══════════════════════════════════════════════════════════════
+
+def _leer_od_config() -> dict:
+    if not os.path.exists(PERSIST_OD):
+        return {}
+    try:
+        with open(PERSIST_OD, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
-def _session_id() -> str:
-    """Identificador simple de sesión (no autenticado)."""
-    if "session_id" not in st.session_state:
-        import uuid
-        st.session_state["session_id"] = str(uuid.uuid4())[:8]
-    return st.session_state["session_id"]
+def _guardar_od_config(cfg: dict):
+    with open(PERSIST_OD, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+def guardar_url_onedrive(url: str) -> None:
+    cfg = _leer_od_config()
+    cfg["url"]        = url.strip()
+    cfg["guardado_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _guardar_od_config(cfg)
+
+
+def eliminar_url_onedrive() -> None:
+    if os.path.exists(PERSIST_OD):
+        os.remove(PERSIST_OD)
+
+
+def _transformar_url_onedrive(url: str) -> str | None:
+    """
+    Convierte un link de compartición OneDrive/SharePoint en URL de descarga directa.
+    - OneDrive personal (1drv.ms, onedrive.live.com): añade download=1
+    - SharePoint corporativo (:x:, :xlsx:, /r/): añade download=1
+    - URLs que ya terminan en /content o tienen download=1: las devuelve tal cual
+    """
+    url = url.strip()
+    if not url:
+        return None
+
+    # Ya tiene parámetro de descarga directa
+    if "download=1" in url:
+        return url
+
+    # Link corto 1drv.ms — requests seguirá el redirect automáticamente
+    if "1drv.ms" in url:
+        sep = "&" if "?" in url else "?"
+        return url + sep + "download=1"
+
+    # OneDrive personal live.com
+    if "onedrive.live.com" in url:
+        sep = "&" if "?" in url else "?"
+        return url + sep + "download=1"
+
+    # SharePoint / OneDrive for Business (xxx.sharepoint.com)
+    if "sharepoint.com" in url:
+        sep = "&" if "?" in url else "?"
+        return url + sep + "download=1"
+
+    # Fallback: intentar añadir download=1 de todas formas
+    sep = "&" if "?" in url else "?"
+    return url + sep + "download=1"
+
+
+def descargar_consolidado_onedrive(url: str) -> tuple:
+    """
+    Descarga el Excel desde OneDrive/SharePoint.
+    Retorna (bytes, "") si tiene éxito o (None, mensaje_error) si falla.
+    """
+    try:
+        import requests
+    except ImportError:
+        return None, "❌ Falta la librería 'requests'. Ejecuta: pip install requests"
+
+    url_dl = _transformar_url_onedrive(url)
+    if not url_dl:
+        return None, "❌ URL vacía o no reconocida."
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,*/*",
+    }
+
+    try:
+        resp = requests.get(url_dl, headers=headers, allow_redirects=True, timeout=45)
+    except requests.exceptions.Timeout:
+        return None, "❌ Tiempo de espera agotado (>45s). Verifica la URL o tu conexión a internet."
+    except requests.exceptions.ConnectionError as e:
+        return None, f"❌ Error de conexión: {e}"
+    except Exception as e:
+        return None, f"❌ Error inesperado al conectar: {e}"
+
+    if resp.status_code == 401:
+        return None, (
+            "🔐 Acceso denegado (401 — sin autorización).\n\n"
+            "El archivo requiere login corporativo. Debes generar un link con permiso "
+            "**'Cualquier persona con el link puede ver'** desde SharePoint:\n\n"
+            "1. Abre el archivo en OneDrive/SharePoint\n"
+            "2. Clic en **Compartir** → **Personas con el link**\n"
+            "3. Cambia a **'Cualquier persona con el link'**\n"
+            "4. Copia el link y pégalo aquí"
+        )
+    if resp.status_code == 403:
+        return None, (
+            "🔐 Acceso prohibido (403).\n\n"
+            "Verifica que el link sea de tipo **'Cualquier persona con el link puede ver'**. "
+            "Los links de tipo 'Solo personas de tu organización' requieren login y no funcionan aquí."
+        )
+    if resp.status_code == 404:
+        return None, "❌ Archivo no encontrado (404). El archivo puede haber sido movido o eliminado. Verifica el link."
+    if resp.status_code != 200:
+        return None, f"❌ Error HTTP {resp.status_code} al descargar. Verifica el link e intenta de nuevo."
+
+    # Detectar si el servidor devolvió una página de login HTML en lugar del archivo
+    content_type = resp.headers.get("Content-Type", "")
+    if ("html" in content_type.lower() and
+            len(resp.content) > 0 and
+            resp.content[:15].lower().startswith((b"<!doctype", b"<html"))):
+        return None, (
+            "🔐 El servidor devolvió una página de login en lugar del archivo.\n\n"
+            "Esto ocurre cuando el link requiere autenticación corporativa. "
+            "Genera un link **'Cualquier persona con el link puede ver'** desde SharePoint."
+        )
+
+    if len(resp.content) < 500:
+        return None, "❌ El archivo descargado parece vacío o incompleto. Verifica el link."
+
+    # Validar magic bytes de Excel
+    magic = resp.content[:4]
+    is_xlsx = magic == b'PK\x03\x04'       # xlsx / zip
+    is_xls  = magic == b'\xd0\xcf\x11\xe0' # xls / OLE2
+    if not (is_xlsx or is_xls):
+        return None, (
+            "❌ El archivo descargado no es un Excel válido.\n\n"
+            "Asegúrate de que el link apunte directamente al archivo .xlsx, "
+            "no a una carpeta ni a la vista previa del navegador."
+        )
+
+    return resp.content, ""
+
+
+def sincronizar_desde_onedrive(url: str, session_id: str) -> tuple:
+    """
+    Descarga y persiste el Consolidado desde OneDrive.
+    Retorna (éxito: bool, mensaje: str).
+    """
+    content, err = descargar_consolidado_onedrive(url)
+    if not content:
+        return False, err
+
+    # Intentar extraer nombre del archivo del URL
+    match = re.search(r'/([^/?#]+\.xlsx)', url, re.IGNORECASE)
+    nombre = match.group(1) if match else "consolidado_onedrive.xlsx"
+
+    try:
+        guardar_cons_persistente(content, nombre, session_id)
+        # Actualizar registro de último sync exitoso
+        cfg = _leer_od_config()
+        cfg["ultimo_sync_ok"]   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cfg["ultimo_sync_size"] = len(content)
+        _guardar_od_config(cfg)
+        return True, f"✅ Consolidado actualizado desde OneDrive ({_fmt_size(len(content))})"
+    except Exception as e:
+        return False, f"❌ Error al guardar el archivo descargado: {e}"
 
 
 # ──────────────────────────────────────────────────────────────
-# PALETA Y ESTILOS SOFTYS (sin cambios)
+# PALETA Y ESTILOS SOFTYS
 # ──────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -261,7 +415,6 @@ button[kind="headerNoPadding"], [data-testid="collapsedControl"] {
 .alert-card.green  { background: #F0FDF4; border-left: 4px solid #00A651; color: #14532D; }
 .alert-card.purple { background: #F5F0FF; border-left: 4px solid #6C3FC4; color: #3B1A78; }
 
-/* ── Tarjeta de archivo persistente ── */
 .persist-card {
     background: #ffffff;
     border-radius: 12px;
@@ -468,7 +621,7 @@ FG_SYNC = {
 }
 
 # ──────────────────────────────────────────────────────────────
-# CARGA Y TRANSFORMACIÓN (con cache por hash MD5)
+# CARGA Y TRANSFORMACIÓN
 # ──────────────────────────────────────────────────────────────
 def detectar_header(content: bytes) -> int:
     df_scan = pd.read_excel(BytesIO(content), sheet_name="Data",
@@ -516,10 +669,10 @@ def cargar_consolidado(fhash: str, content: bytes) -> pd.DataFrame:
     wb = openpyxl.load_workbook(BytesIO(content), data_only=True)
     if "Consolidado de Contratos" not in wb.sheetnames:
         raise ValueError("No se encontró la hoja 'Consolidado de Contratos'.")
-    ws  = wb["Consolidado de Contratos"]
+    ws   = wb["Consolidado de Contratos"]
     rows = list(ws.iter_rows(values_only=True))
-    df  = pd.DataFrame(rows[1:], columns=rows[0]).dropna(how="all").reset_index(drop=True)
-    df  = df.rename(columns={k: v for k, v in CONS_COL_MAP.items() if k in df.columns})
+    df   = pd.DataFrame(rows[1:], columns=rows[0]).dropna(how="all").reset_index(drop=True)
+    df   = df.rename(columns={k: v for k, v in CONS_COL_MAP.items() if k in df.columns})
     df["id"] = df["id"].astype(str).str.strip() if "id" in df.columns else ""
     for col in ("fecha_termino_cons","venc_garantia"):
         if col in df.columns:
@@ -528,7 +681,7 @@ def cargar_consolidado(fhash: str, content: bytes) -> pd.DataFrame:
 
 
 # ──────────────────────────────────────────────────────────────
-# UNIVERSO UNIFICADO: FULL OUTER JOIN Pivot + Consolidado
+# UNIVERSO UNIFICADO
 # ──────────────────────────────────────────────────────────────
 def construir_universo(df_p: pd.DataFrame, df_c: pd.DataFrame | None) -> pd.DataFrame:
     if df_c is None:
@@ -648,12 +801,10 @@ def comparar(df_p: pd.DataFrame, df_c: pd.DataFrame) -> pd.DataFrame:
 
 
 # ══════════════════════════════════════════════════════════════
-# ▶ BLOQUE 2: SIDEBAR — Gestión de archivos persistentes
-#   Reemplaza el bloque "with st.sidebar:" original
+# SIDEBAR
 # ══════════════════════════════════════════════════════════════
 
 with st.sidebar:
-    # Logo / header Softys
     st.markdown("""
     <div style="padding:12px 4px 18px;border-bottom:1px solid rgba(255,255,255,0.2);margin-bottom:4px;">
       <div style="display:flex;align-items:center;gap:10px;">
@@ -672,15 +823,21 @@ with st.sidebar:
     <div style="height:8px"></div>
     """, unsafe_allow_html=True)
 
-    # ── PIVOT: leer estado persistente ────────────────────────
-    piv_bytes_persist, piv_meta = leer_pivot_persistente()
+    # ── Leer estado persistente ────────────────────────────────
+    piv_bytes_persist, piv_meta   = leer_pivot_persistente()
     cons_bytes_persist, cons_meta = leer_cons_persistente()
+    od_cfg = _leer_od_config()
 
-    # ─── Sección Pivot ────────────────────────────────────────
-    st.markdown('<div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:rgba(232,242,251,0.6);margin-bottom:6px;">📁 Pivot Ariba <span style="color:#7DD3FC;">(obligatorio)</span></div>', unsafe_allow_html=True)
+    # ══════════════════════════════════════════════════════════
+    # SECCIÓN PIVOT
+    # ══════════════════════════════════════════════════════════
+    st.markdown(
+        '<div style="font-size:.72rem;font-weight:700;text-transform:uppercase;'
+        'letter-spacing:.08em;color:rgba(232,242,251,0.6);margin-bottom:6px;">'
+        '📁 Pivot Ariba <span style="color:#7DD3FC;">(obligatorio)</span></div>',
+        unsafe_allow_html=True)
 
     if piv_bytes_persist and piv_meta:
-        # Mostrar info del archivo guardado
         ts_up  = piv_meta.get("uploaded_at","—")
         size_s = _fmt_size(piv_meta.get("size_bytes",0))
         fname  = piv_meta.get("filename","—")
@@ -692,14 +849,11 @@ with st.sidebar:
                       color:#7DEFA3;margin-bottom:2px;">✅ Archivo guardado en servidor</div>
           <div style="font-size:.78rem;font-weight:700;color:#ffffff;word-break:break-all;">{fname}</div>
           <div style="font-size:.65rem;color:rgba(232,242,251,0.65);margin-top:3px;line-height:1.6;">
-            📅 {ts_up}<br>
-            💾 {size_s} &nbsp;·&nbsp; 🔑 MD5 OK<br>
-            👤 sesión {by_s}
+            📅 {ts_up}<br>💾 {size_s} &nbsp;·&nbsp; 🔑 MD5 OK<br>👤 sesión {by_s}
           </div>
         </div>
         """, unsafe_allow_html=True)
 
-        # Mostrar uploader para reemplazar
         with st.expander("🔄 Reemplazar Pivot", expanded=False):
             st.caption("Sube un nuevo archivo para sobrescribir el actual en el servidor.")
             up_pivot_new = st.file_uploader("Nuevo Pivot", type=["xlsx","xls"],
@@ -719,17 +873,16 @@ with st.sidebar:
 
         col_del_piv, _ = st.columns([1,1])
         with col_del_piv:
-            if st.button("🗑️ Eliminar Pivot", key="btn_del_piv", help="Elimina el archivo del servidor"):
+            if st.button("🗑️ Eliminar Pivot", key="btn_del_piv",
+                         help="Elimina el archivo del servidor"):
                 eliminar_pivot_persistente()
                 st.warning("Pivot eliminado del servidor.")
                 st.rerun()
 
-        # Usar bytes del servidor
         piv_bytes = piv_bytes_persist
-        up_pivot  = None   # No hay uploader activo
+        up_pivot  = None
 
     else:
-        # No existe archivo persistente → uploader normal
         up_pivot = st.file_uploader("Pivot", type=["xlsx","xls"],
                                      key="piv", label_visibility="collapsed")
         st.caption("Descarga directa de SAP Ariba Analysis")
@@ -737,7 +890,6 @@ with st.sidebar:
         if up_pivot:
             up_pivot.seek(0)
             piv_bytes = up_pivot.read()
-            # ─── PRIMERA SUBIDA: guardar automáticamente ────
             if st.button("💾 Guardar en servidor", key="btn_save_piv_first"):
                 with st.spinner("Guardando Pivot en servidor…"):
                     guardar_pivot_persistente(piv_bytes, up_pivot.name, _session_id())
@@ -746,26 +898,103 @@ with st.sidebar:
             else:
                 st.caption("⚡ El archivo se usa en esta sesión. Guárdalo para que persista entre sesiones.")
 
-    # ─── Sección Consolidado ──────────────────────────────────
-    st.markdown('<div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:rgba(232,242,251,0.6);margin-bottom:6px;margin-top:14px;">📄 Consolidado Drive <span style="color:rgba(232,242,251,0.5);">(opcional)</span></div>', unsafe_allow_html=True)
+    # ══════════════════════════════════════════════════════════
+    # SECCIÓN CONSOLIDADO — con integración OneDrive
+    # ══════════════════════════════════════════════════════════
+    st.markdown(
+        '<div style="font-size:.72rem;font-weight:700;text-transform:uppercase;'
+        'letter-spacing:.08em;color:rgba(232,242,251,0.6);margin-bottom:6px;margin-top:14px;">'
+        '📄 Consolidado OneDrive <span style="color:rgba(232,242,251,0.5);">(opcional)</span></div>',
+        unsafe_allow_html=True)
 
+    # ── Tarjeta de estado si hay archivo persistente ──────────
     if cons_bytes_persist and cons_meta:
-        ts_c   = cons_meta.get("uploaded_at","—")
-        size_c = _fmt_size(cons_meta.get("size_bytes",0))
+        ts_c    = cons_meta.get("uploaded_at","—")
+        size_c  = _fmt_size(cons_meta.get("size_bytes",0))
         fname_c = cons_meta.get("filename","—")
+        # Mostrar si tiene URL OneDrive configurada
+        od_url_guardada = od_cfg.get("url","")
+        od_ultimo_sync  = od_cfg.get("ultimo_sync_ok","—")
+        if od_url_guardada:
+            badge_od = f'<span style="font-size:.58rem;background:rgba(0,114,206,0.3);color:#7DD3FC;border-radius:4px;padding:1px 6px;margin-left:4px;">🔗 OneDrive vinculado</span>'
+        else:
+            badge_od = f'<span style="font-size:.58rem;background:rgba(255,255,255,0.1);color:rgba(232,242,251,0.5);border-radius:4px;padding:1px 6px;margin-left:4px;">📁 subida manual</span>'
+
         st.markdown(f"""
         <div style="background:rgba(108,63,196,0.18);border-radius:10px;border-left:3px solid #9F7AEA;
                     padding:10px 12px;margin-bottom:8px;">
           <div style="font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;
-                      color:#C4B5FD;margin-bottom:2px;">✅ Consolidado guardado</div>
+                      color:#C4B5FD;margin-bottom:2px;">✅ Consolidado guardado {badge_od}</div>
           <div style="font-size:.78rem;font-weight:700;color:#ffffff;word-break:break-all;">{fname_c}</div>
           <div style="font-size:.65rem;color:rgba(232,242,251,0.65);margin-top:3px;line-height:1.6;">
             📅 {ts_c} &nbsp;·&nbsp; 💾 {size_c}
+            {"<br>🔄 Último sync OneDrive: " + od_ultimo_sync if od_url_guardada else ""}
           </div>
         </div>
         """, unsafe_allow_html=True)
 
-        with st.expander("🔄 Reemplazar Consolidado", expanded=False):
+        # ── Botón principal: Actualizar desde OneDrive ────────
+        if od_url_guardada:
+            if st.button("🔄 Actualizar desde OneDrive", key="btn_sync_od_main",
+                         help="Descarga la última versión del archivo desde OneDrive y actualiza el dashboard"):
+                with st.spinner("Conectando con OneDrive y descargando…"):
+                    ok, msg = sincronizar_desde_onedrive(od_url_guardada, _session_id())
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+        # ── Expander: Configurar / cambiar URL OneDrive ───────
+        with st.expander("🔗 Configurar link OneDrive", expanded=not od_url_guardada):
+            st.markdown(
+                '<div style="font-size:.7rem;color:rgba(232,242,251,0.75);line-height:1.6;margin-bottom:8px;">'
+                '📌 <strong>Cómo obtener el link:</strong><br>'
+                '1. Abre el archivo en OneDrive / SharePoint<br>'
+                '2. Clic en <strong>Compartir</strong><br>'
+                '3. Selecciona <strong>"Cualquier persona con el link"</strong><br>'
+                '4. Copia el link y pégalo abajo<br>'
+                '<span style="color:#FCA5A5;">⚠️ Links de "Solo tu organización" requieren login y no funcionan aquí</span>'
+                '</div>',
+                unsafe_allow_html=True)
+
+            url_input = st.text_input(
+                "Link de OneDrive / SharePoint",
+                value=od_url_guardada,
+                placeholder="https://softys-my.sharepoint.com/:x:/r/...",
+                key="od_url_input",
+                label_visibility="collapsed")
+
+            col_od1, col_od2 = st.columns([3, 2])
+            with col_od1:
+                if st.button("💾 Guardar link", key="btn_guardar_od_url"):
+                    url_limpia = url_input.strip() if url_input else ""
+                    if not url_limpia:
+                        st.warning("⚠️ Escribe un link primero.")
+                    elif "sharepoint.com" not in url_limpia and "onedrive.live.com" not in url_limpia and "1drv.ms" not in url_limpia:
+                        st.error("❌ El link no parece ser de OneDrive o SharePoint.")
+                    else:
+                        guardar_url_onedrive(url_limpia)
+                        st.success("✅ Link guardado.")
+                        st.rerun()
+            with col_od2:
+                if od_url_guardada and st.button("🗑️ Quitar link", key="btn_del_od_url"):
+                    eliminar_url_onedrive()
+                    st.rerun()
+
+            # Botón de prueba de conexión
+            if url_input and url_input.strip():
+                if st.button("🧪 Probar conexión", key="btn_test_od"):
+                    with st.spinner("Probando descarga…"):
+                        content_test, err_test = descargar_consolidado_onedrive(url_input.strip())
+                    if content_test:
+                        st.success(f"✅ Conexión OK — archivo descargado ({_fmt_size(len(content_test))})")
+                    else:
+                        st.error(err_test)
+
+        # ── Expander: Reemplazar manualmente ──────────────────
+        with st.expander("📁 Reemplazar con archivo local", expanded=False):
+            st.caption("Alternativa: sube el archivo manualmente desde tu PC.")
             up_cons_new = st.file_uploader("Nuevo Consolidado", type=["xlsx","xls"],
                                             key="con_replace", label_visibility="collapsed")
             if up_cons_new:
@@ -784,6 +1013,7 @@ with st.sidebar:
         with col_del_cons:
             if st.button("🗑️ Eliminar Consolidado", key="btn_del_cons"):
                 eliminar_cons_persistente()
+                eliminar_url_onedrive()
                 st.warning("Consolidado eliminado.")
                 st.rerun()
 
@@ -791,29 +1021,76 @@ with st.sidebar:
         up_cons    = None
 
     else:
-        up_cons = st.file_uploader("Consolidado", type=["xlsx","xls"],
-                                    key="con", label_visibility="collapsed")
-        st.caption("Archivo del SharePoint")
-        cons_bytes = None
-        if up_cons:
-            up_cons.seek(0)
-            cons_bytes = up_cons.read()
-            if st.button("💾 Guardar Consolidado en servidor", key="btn_save_cons_first"):
-                with st.spinner("Guardando Consolidado…"):
-                    guardar_cons_persistente(cons_bytes, up_cons.name, _session_id())
-                st.success("✅ Consolidado guardado.")
-                st.rerun()
-            else:
-                st.caption("⚡ Usado solo en esta sesión. Guárdalo para persistir.")
+        # ── Sin archivo persistente: mostrar opciones de carga ─
+        st.markdown(
+            '<div style="font-size:.68rem;color:rgba(232,242,251,0.6);margin-bottom:8px;line-height:1.5;">'
+            'Conecta el archivo desde OneDrive o súbelo manualmente.</div>',
+            unsafe_allow_html=True)
+
+        # ── Opción A: Link OneDrive ────────────────────────────
+        with st.expander("🔗 Cargar desde OneDrive", expanded=True):
+            st.markdown(
+                '<div style="font-size:.7rem;color:rgba(232,242,251,0.75);line-height:1.6;margin-bottom:6px;">'
+                '📌 El link debe ser <strong>"Cualquier persona con el link"</strong> desde SharePoint.<br>'
+                '<span style="color:#FCA5A5;">⚠️ Links de "Solo tu organización" requieren login y no funcionan.</span>'
+                '</div>',
+                unsafe_allow_html=True)
+
+            url_nueva = st.text_input(
+                "Link OneDrive / SharePoint",
+                placeholder="https://softys-my.sharepoint.com/:x:/r/...",
+                key="od_url_nueva",
+                label_visibility="collapsed")
+
+            if url_nueva and url_nueva.strip():
+                col_t1, col_t2 = st.columns(2)
+                with col_t1:
+                    if st.button("⬇️ Descargar y guardar", key="btn_od_descarga_nueva"):
+                        url_n = url_nueva.strip()
+                        if "sharepoint.com" not in url_n and "onedrive.live.com" not in url_n and "1drv.ms" not in url_n:
+                            st.error("❌ El link no parece ser de OneDrive o SharePoint.")
+                        else:
+                            with st.spinner("Descargando desde OneDrive…"):
+                                ok, msg = sincronizar_desde_onedrive(url_n, _session_id())
+                            if ok:
+                                guardar_url_onedrive(url_n)
+                                st.success(msg + "\n\nLink guardado para futuras actualizaciones.")
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                with col_t2:
+                    if st.button("🧪 Probar link", key="btn_test_od_nueva"):
+                        with st.spinner("Probando…"):
+                            c_test, e_test = descargar_consolidado_onedrive(url_nueva.strip())
+                        if c_test:
+                            st.success(f"✅ OK ({_fmt_size(len(c_test))})")
+                        else:
+                            st.error(e_test)
+
+        # ── Opción B: Subida manual ────────────────────────────
+        with st.expander("📁 Subir archivo manualmente", expanded=False):
+            up_cons = st.file_uploader("Consolidado", type=["xlsx","xls"],
+                                        key="con", label_visibility="collapsed")
+            st.caption("Descarga el archivo de SharePoint y súbelo aquí.")
+            cons_bytes = None
+            if up_cons:
+                up_cons.seek(0)
+                cons_bytes = up_cons.read()
+                if st.button("💾 Guardar Consolidado en servidor", key="btn_save_cons_first"):
+                    with st.spinner("Guardando Consolidado…"):
+                        guardar_cons_persistente(cons_bytes, up_cons.name, _session_id())
+                    st.success("✅ Consolidado guardado.")
+                    st.rerun()
+                else:
+                    st.caption("⚡ Usado solo en esta sesión. Guárdalo para persistir.")
+        up_cons = None  # evitar referencia suelta
 
     st.markdown("---")
     filtros_ph = st.empty()
 
 # ══════════════════════════════════════════════════════════════
-# ▶ BLOQUE 3: PANTALLA DE BIENVENIDA — sin cambios estructurales
+# PANTALLA DE BIENVENIDA
 # ══════════════════════════════════════════════════════════════
-
-# Determinar si hay bytes disponibles (persistente o upload en sesión)
 _tiene_pivot = (piv_bytes is not None) or (piv_bytes_persist is not None)
 _bytes_pivot  = piv_bytes if piv_bytes is not None else piv_bytes_persist
 
@@ -821,7 +1098,6 @@ if not _tiene_pivot or _bytes_pivot is None:
     st.markdown("""
     <div style="display:flex;flex-direction:column;align-items:center;
          justify-content:center;padding:70px 30px 40px;text-align:center;">
-
       <div style="background:linear-gradient(135deg,#005CA9,#0072CE);
                   border-radius:16px;padding:16px 24px;margin-bottom:24px;
                   box-shadow:0 8px 24px rgba(0,92,169,.25);">
@@ -831,7 +1107,6 @@ if not _tiene_pivot or _bytes_pivot is None:
           Softys · Gestión de Contratos
         </span>
       </div>
-
       <h1 style="font-size:1.55rem;font-weight:800;color:#1A2E44;margin:0 0 10px;line-height:1.25;">
         Dashboard de Compras Estratégicas
       </h1>
@@ -840,7 +1115,6 @@ if not _tiene_pivot or _bytes_pivot is None:
         Agrega el <strong style="color:#6C3FC4;">Consolidado del Drive</strong> para detectar
         qué está desactualizado y quién debe actualizarlo.
       </p>
-
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;max-width:680px;width:100%;">
         <div style="background:#ffffff;border-radius:12px;padding:16px 12px;
                     border-top:3px solid #00A651;box-shadow:0 2px 8px rgba(0,0,0,.06);">
@@ -867,7 +1141,6 @@ if not _tiene_pivot or _bytes_pivot is None:
           <div style="font-size:.72rem;color:#8FA3B8;margin-top:3px;">Alertas personalizadas</div>
         </div>
       </div>
-
       <div style="margin-top:32px;padding:12px 20px;background:#EAF2FB;
                   border-radius:99px;font-size:.78rem;color:#005CA9;font-weight:600;">
         ← Sube el Pivot de Ariba en la barra lateral para comenzar
@@ -877,9 +1150,8 @@ if not _tiene_pivot or _bytes_pivot is None:
     st.stop()
 
 # ──────────────────────────────────────────────────────────────
-# CARGA DE DATOS  (usa _bytes_pivot en lugar de up_pivot)
+# CARGA DE DATOS
 # ──────────────────────────────────────────────────────────────
-
 with st.spinner("Procesando Pivot de Ariba..."):
     try:
         df_piv = cargar_pivot(_md5(_bytes_pivot), _bytes_pivot)
@@ -899,18 +1171,18 @@ with st.spinner("Unificando fuentes..."):
     df_universo = construir_universo(df_piv, df_cons_raw)
 
 # ──────────────────────────────────────────────────────────────
-# FILTROS  (sin cambios)
+# FILTROS
 # ──────────────────────────────────────────────────────────────
-
-# Nombre de archivo para mostrar en sidebar
-_piv_name = (piv_meta.get("filename","pivot.xlsx") if piv_meta
-             else (up_pivot.name if up_pivot else "pivot.xlsx"))
-_cons_name = (cons_meta.get("filename","consolidado.xlsx") if cons_meta
-              else (up_cons.name if up_cons else "consolidado.xlsx"))
+_piv_name  = (piv_meta.get("filename","pivot.xlsx") if piv_meta
+              else (up_pivot.name if up_pivot else "pivot.xlsx"))
+_cons_name = (cons_meta.get("filename","consolidado.xlsx") if cons_meta else "consolidado.xlsx")
 
 with st.sidebar:
     with filtros_ph.container():
-        st.markdown('<div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:rgba(232,242,251,0.6);margin-bottom:8px;">🎛️ Filtros</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div style="font-size:.72rem;font-weight:700;text-transform:uppercase;'
+            'letter-spacing:.08em;color:rgba(232,242,251,0.6);margin-bottom:8px;">🎛️ Filtros</div>',
+            unsafe_allow_html=True)
 
         mostrar_solo_oficiales = st.checkbox("Solo compradores oficiales", value=True,
             help="Filtra contratos cuyo propietario es un comprador registrado")
@@ -928,11 +1200,12 @@ with st.sidebar:
 
         st.markdown("---")
         n_solo_cons = (df_universo["fuente"] == "Solo Consolidado").sum()
-        # Mostrar info de origen
         piv_ts_label = f"\n📅 {piv_meta['uploaded_at']}" if piv_meta else ""
         st.caption(f"📁 {_piv_name}{piv_ts_label}\n{len(df_piv):,} contratos activos en Ariba")
         if df_cons_raw is not None:
-            st.caption(f"📄 {_cons_name}\n{len(df_cons_raw):,} filas · {n_solo_cons:,} solo en Drive")
+            od_url_sidebar = od_cfg.get("url","")
+            od_sync_label  = f"\n🔗 OneDrive · último sync: {od_cfg.get('ultimo_sync_ok','—')}" if od_url_sidebar else ""
+            st.caption(f"📄 {_cons_name}{od_sync_label}\n{len(df_cons_raw):,} filas · {n_solo_cons:,} solo en Drive")
 
 # Aplicar filtros
 df = df_universo.copy()
@@ -953,15 +1226,28 @@ if df.empty:
 # ──────────────────────────────────────────────────────────────
 # ENCABEZADO
 # ──────────────────────────────────────────────────────────────
-
 n_solo_cons_vis = (df["fuente"] == "Solo Consolidado").sum()
 pills = []
 if df_cons_raw is not None:
-    pills.append('<span style="background:#EAF2FB;color:#005CA9;border-radius:99px;padding:3px 11px;font-size:.68rem;font-weight:700;margin-left:8px;border:1px solid #B8D4EF;">🔄 Sincronización activa</span>')
+    od_url_h = od_cfg.get("url","")
+    if od_url_h:
+        pills.append(
+            '<span style="background:#EAF2FB;color:#005CA9;border-radius:99px;padding:3px 11px;'
+            'font-size:.68rem;font-weight:700;margin-left:8px;border:1px solid #B8D4EF;">'
+            '🔗 OneDrive vinculado</span>')
+    pills.append(
+        '<span style="background:#EAF2FB;color:#005CA9;border-radius:99px;padding:3px 11px;'
+        'font-size:.68rem;font-weight:700;margin-left:5px;border:1px solid #B8D4EF;">'
+        '🔄 Sincronización activa</span>')
 if n_solo_cons_vis > 0:
-    pills.append(f'<span style="background:#F0EAFF;color:#6C3FC4;border-radius:99px;padding:3px 11px;font-size:.68rem;font-weight:700;margin-left:5px;border:1px solid #D4C5F0;">📂 {n_solo_cons_vis} solo en Drive</span>')
-# Badge de persistencia activa
-pills.append('<span style="background:#F0FDF4;color:#00703A;border-radius:99px;padding:3px 11px;font-size:.68rem;font-weight:700;margin-left:5px;border:1px solid #A7F3D0;">💾 Datos persistentes</span>')
+    pills.append(
+        f'<span style="background:#F0EAFF;color:#6C3FC4;border-radius:99px;padding:3px 11px;'
+        f'font-size:.68rem;font-weight:700;margin-left:5px;border:1px solid #D4C5F0;">'
+        f'📂 {n_solo_cons_vis} solo en Drive</span>')
+pills.append(
+    '<span style="background:#F0FDF4;color:#00703A;border-radius:99px;padding:3px 11px;'
+    'font-size:.68rem;font-weight:700;margin-left:5px;border:1px solid #A7F3D0;">'
+    '💾 Datos persistentes</span>')
 
 st.markdown(f"""
 <div style="display:flex;justify-content:space-between;align-items:flex-end;
@@ -987,9 +1273,8 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────
-# TABS (sin cambios en lógica de negocio)
+# TABS
 # ──────────────────────────────────────────────────────────────
-
 if df_cons_raw is not None:
     tab_kpi, tab_sync, tab_comp, tab_prov, tab_gar_tab, tab_exp = st.tabs([
         "📊 Resumen & KPIs", "🔄 Sincronización", "📌 Por Comprador",
@@ -1073,7 +1358,8 @@ with tab_kpi:
                               font_color="#1A2E44", font_family="Inter", showarrow=False)],
             legend=dict(font=dict(size=9, family="Inter"), orientation="h", y=-0.15),
             paper_bgcolor="#ffffff", margin=dict(t=36,b=44,l=8,r=8), height=280,
-            title=dict(text="Distribución de riesgo", font=dict(size=12,color="#1A2E44",family="Inter"), x=0.02))
+            title=dict(text="Distribución de riesgo",
+                       font=dict(size=12,color="#1A2E44",family="Inter"), x=0.02))
         st.plotly_chart(fig, use_container_width=True)
 
     with c2:
@@ -1113,10 +1399,12 @@ with tab_kpi:
                        font=dict(size=12,color="#1A2E44",family="Inter"), x=0.02))
         st.plotly_chart(fig_f, use_container_width=True)
 
-    st.markdown('<div class="sec">🚨 Contratos que requieren acción inmediata</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec">🚨 Contratos que requieren acción inmediata</div>',
+                unsafe_allow_html=True)
     df_alt = df[df["riesgo"].isin(["ALTO 🔴","MEDIO 🟡"])].copy()
     if not df_alt.empty:
-        cols_a = [c for c in ["id","proveedor","comprador_canon","estado_ariba","dias_venc","riesgo","tiene_garantia","fuente"] if c in df_alt]
+        cols_a = [c for c in ["id","proveedor","comprador_canon","estado_ariba","dias_venc",
+                               "riesgo","tiene_garantia","fuente"] if c in df_alt]
         ren    = {"id":"Contrato","proveedor":"Proveedor","comprador_canon":"Comprador",
                   "estado_ariba":"Estado","dias_venc":"Días","riesgo":"Riesgo",
                   "tiene_garantia":"Garantía","fuente":"Fuente"}
@@ -1126,9 +1414,10 @@ with tab_kpi:
             if "MEDIO" in str(v): return "background:#FFFBEB;color:#78350F;font-weight:600"
             if str(v) == "Solo Consolidado": return "background:#F5F0FF;color:#3B1A78;font-weight:600"
             return ""
-        st.dataframe(tbl.style.map(hl, subset=[c for c in ["Riesgo","Fuente"] if c in tbl.columns])
-                     .format({"Días":"{:.0f}"}, na_rep="—"),
-                     use_container_width=True, height=240)
+        st.dataframe(
+            tbl.style.map(hl, subset=[c for c in ["Riesgo","Fuente"] if c in tbl.columns])
+               .format({"Días":"{:.0f}"}, na_rep="—"),
+            use_container_width=True, height=240)
         a1,a2 = st.columns(2)
         a1.error(f"🚨 **{(df['riesgo']=='ALTO 🔴').sum()}** contratos en riesgo ALTO — acción urgente")
         a2.warning(f"⚠️ **{(df['riesgo']=='MEDIO 🟡').sum()}** contratos próximos a vencer")
@@ -1191,10 +1480,15 @@ if tab_sync is not None:
         if not compradores_con_prob:
             st.success("🎉 ¡El Consolidado está completamente sincronizado con el Pivot de Ariba!")
         else:
-            f_sync_comp = st.selectbox("Ver alertas de:", ["Todos los compradores"] + compradores_con_prob, key="f_sync_comp")
-            df_prob_view = problemas if f_sync_comp == "Todos los compradores" else problemas[problemas["comprador_canon"] == f_sync_comp]
+            f_sync_comp = st.selectbox(
+                "Ver alertas de:",
+                ["Todos los compradores"] + compradores_con_prob,
+                key="f_sync_comp")
+            df_prob_view = (problemas if f_sync_comp == "Todos los compradores"
+                            else problemas[problemas["comprador_canon"] == f_sync_comp])
 
-            for comp in (compradores_con_prob if f_sync_comp == "Todos los compradores" else [f_sync_comp]):
+            for comp in (compradores_con_prob if f_sync_comp == "Todos los compradores"
+                         else [f_sync_comp]):
                 grp = df_prob_view[df_prob_view["comprador_canon"] == comp]
                 if grp.empty: continue
                 n_grp = len(grp)
@@ -1205,9 +1499,11 @@ if tab_sync is not None:
                 tipo  = tipo_comprador(comp)
                 es_of = es_comprador_oficial(comp)
                 badge_tipo = (
-                    f"<span style='background:#EAF2FB;color:#005CA9;border-radius:6px;padding:1px 8px;font-size:.67rem;margin-left:6px;font-weight:700;'>{tipo}</span>"
+                    f"<span style='background:#EAF2FB;color:#005CA9;border-radius:6px;"
+                    f"padding:1px 8px;font-size:.67rem;margin-left:6px;font-weight:700;'>{tipo}</span>"
                     if es_of else
-                    "<span style='background:#FFFBEB;color:#78350F;border-radius:6px;padding:1px 8px;font-size:.67rem;margin-left:6px;font-weight:700;'>No registrado</span>")
+                    "<span style='background:#FFFBEB;color:#78350F;border-radius:6px;"
+                    "padding:1px 8px;font-size:.67rem;margin-left:6px;font-weight:700;'>No registrado</span>")
                 severity = "red" if n_d > 0 or n_n > 0 else ("purple" if n_sc2 > 0 else "yellow")
                 partes = []
                 if n_d:   partes.append(f"<strong>{n_d}</strong> desactualizados")
@@ -1216,22 +1512,36 @@ if tab_sync is not None:
                 if n_r:   partes.append(f"<strong>{n_r}</strong> por revisar")
                 resumen_html = " &nbsp;·&nbsp; ".join(partes)
 
-                with st.expander(f"👤 {comp}{badge_tipo}  —  {n_grp} contrato(s) con diferencias", expanded=(n_d+n_n > 0)):
-                    st.markdown(f'<div class="alert-card {severity}"><strong>Situación para {comp}:</strong><br>{resumen_html}</div>', unsafe_allow_html=True)
-                    cols_det = [c for c in ["id","proveedor","proveedor_cons","estado_ariba","estado_cons_ariba",
-                                             "fecha_termino","fecha_termino_cons","sync_status","cambios"] if c in grp.columns]
-                    ren_det  = {"id":"Contrato","proveedor":"Proveedor (Ariba)","proveedor_cons":"Proveedor (Drive)",
-                                "estado_ariba":"Estado Ariba","estado_cons_ariba":"Estado en Drive",
-                                "fecha_termino":"Fecha Ariba","fecha_termino_cons":"Fecha en Drive",
-                                "sync_status":"Estado Sync","cambios":"Detalle"}
+                with st.expander(
+                        f"👤 {comp}{badge_tipo}  —  {n_grp} contrato(s) con diferencias",
+                        expanded=(n_d+n_n > 0)):
+                    st.markdown(
+                        f'<div class="alert-card {severity}"><strong>Situación para {comp}:'
+                        f'</strong><br>{resumen_html}</div>',
+                        unsafe_allow_html=True)
+                    cols_det = [c for c in [
+                        "id","proveedor","proveedor_cons","estado_ariba","estado_cons_ariba",
+                        "fecha_termino","fecha_termino_cons","sync_status","cambios"]
+                        if c in grp.columns]
+                    ren_det  = {
+                        "id":"Contrato","proveedor":"Proveedor (Ariba)",
+                        "proveedor_cons":"Proveedor (Drive)",
+                        "estado_ariba":"Estado Ariba","estado_cons_ariba":"Estado en Drive",
+                        "fecha_termino":"Fecha Ariba","fecha_termino_cons":"Fecha en Drive",
+                        "sync_status":"Estado Sync","cambios":"Detalle"}
                     tbl_det = grp[cols_det].rename(columns=ren_det)
                     def hl_sync_row(val):
                         bg = BG_SYNC.get(str(val),""); fg = FG_SYNC.get(str(val),"")
                         return f"background:{bg};color:{fg};font-weight:600" if bg else ""
-                    st.dataframe(tbl_det.style.map(hl_sync_row, subset=["Estado Sync"] if "Estado Sync" in tbl_det.columns else []),
-                                 use_container_width=True, height=min(300, 60 + len(grp)*38))
+                    st.dataframe(
+                        tbl_det.style.map(
+                            hl_sync_row,
+                            subset=["Estado Sync"] if "Estado Sync" in tbl_det.columns else []),
+                        use_container_width=True,
+                        height=min(300, 60 + len(grp)*38))
 
-        st.markdown('<div class="sec">📊 Estado de sincronización por comprador</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec">📊 Estado de sincronización por comprador</div>',
+                    unsafe_allow_html=True)
         sc = df_cmp.groupby(["comprador_canon","sync_status"]).size().reset_index(name="n")
         fig_sc = px.bar(sc, y="comprador_canon", x="n", color="sync_status",
             color_discrete_map=COL_SYNC, barmode="stack", orientation="h",
@@ -1247,31 +1557,39 @@ if tab_sync is not None:
             margin=dict(t=10,b=60,l=10,r=10))
         st.plotly_chart(fig_sc, use_container_width=True)
 
-        st.markdown('<div class="sec">📥 Exportar reporte de sincronización</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec">📥 Exportar reporte de sincronización</div>',
+                    unsafe_allow_html=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M")
-        cols_exp = [c for c in ["id","proveedor","proveedor_cons","comprador_canon",
-                                  "estado_ariba","estado_cons_ariba",
-                                  "fecha_termino","fecha_termino_cons","sync_status","cambios"] if c in df_cmp.columns]
-        ren_exp  = {"id":"Contrato","proveedor":"Proveedor Ariba","proveedor_cons":"Proveedor Drive",
-                    "comprador_canon":"Comprador","estado_ariba":"Estado Ariba",
-                    "estado_cons_ariba":"Estado Drive","fecha_termino":"Fecha Ariba",
-                    "fecha_termino_cons":"Fecha Drive","sync_status":"Estado Sync","cambios":"Detalle"}
+        cols_exp = [c for c in [
+            "id","proveedor","proveedor_cons","comprador_canon",
+            "estado_ariba","estado_cons_ariba",
+            "fecha_termino","fecha_termino_cons","sync_status","cambios"]
+            if c in df_cmp.columns]
+        ren_exp  = {
+            "id":"Contrato","proveedor":"Proveedor Ariba","proveedor_cons":"Proveedor Drive",
+            "comprador_canon":"Comprador","estado_ariba":"Estado Ariba",
+            "estado_cons_ariba":"Estado Drive","fecha_termino":"Fecha Ariba",
+            "fecha_termino_cons":"Fecha Drive","sync_status":"Estado Sync","cambios":"Detalle"}
         e1,e2,e3,e4 = st.columns(4)
         with e1:
             pend = df_cmp[df_cmp["sync_status"] != "OK"][cols_exp].rename(columns=ren_exp)
-            st.download_button("⚠️ Todos los pendientes", pend.to_csv(index=False).encode("utf-8-sig"),
+            st.download_button("⚠️ Todos los pendientes",
+                               pend.to_csv(index=False).encode("utf-8-sig"),
                                f"sync_pendientes_{ts}.csv", mime="text/csv")
         with e2:
             nuev = df_cmp[df_cmp["sync_status"]=="NUEVO EN ARIBA"][cols_exp].rename(columns=ren_exp)
-            st.download_button("🆕 Nuevos en Ariba", nuev.to_csv(index=False).encode("utf-8-sig"),
+            st.download_button("🆕 Nuevos en Ariba",
+                               nuev.to_csv(index=False).encode("utf-8-sig"),
                                f"sync_nuevos_ariba_{ts}.csv", mime="text/csv")
         with e3:
             solo_c_exp = df_cmp[df_cmp["sync_status"]=="SOLO CONSOLIDADO"][cols_exp].rename(columns=ren_exp)
-            st.download_button("📂 Solo en Drive", solo_c_exp.to_csv(index=False).encode("utf-8-sig"),
+            st.download_button("📂 Solo en Drive",
+                               solo_c_exp.to_csv(index=False).encode("utf-8-sig"),
                                f"sync_solo_drive_{ts}.csv", mime="text/csv")
         with e4:
             desact = df_cmp[df_cmp["sync_status"]=="DESACTUALIZADO"][cols_exp].rename(columns=ren_exp)
-            st.download_button("🔄 Estado/fecha diferente", desact.to_csv(index=False).encode("utf-8-sig"),
+            st.download_button("🔄 Estado/fecha diferente",
+                               desact.to_csv(index=False).encode("utf-8-sig"),
                                f"sync_desact_{ts}.csv", mime="text/csv")
 
 
@@ -1289,10 +1607,12 @@ with tab_comp:
 
     dc = df.groupby(["comprador_canon","riesgo"]).size().reset_index(name="n")
     orden = df["comprador_canon"].value_counts().index.tolist()
-    dc["comprador_canon"] = pd.Categorical(dc["comprador_canon"], categories=orden[::-1], ordered=True)
+    dc["comprador_canon"] = pd.Categorical(dc["comprador_canon"],
+                                            categories=orden[::-1], ordered=True)
     dc = dc.sort_values("comprador_canon")
-    fig_c = px.bar(dc, y="comprador_canon", x="n", color="riesgo", color_discrete_map=COL_RIESGO,
-        barmode="stack", orientation="h", labels={"comprador_canon":"","n":"Contratos","riesgo":"Riesgo"})
+    fig_c = px.bar(dc, y="comprador_canon", x="n", color="riesgo",
+        color_discrete_map=COL_RIESGO, barmode="stack", orientation="h",
+        labels={"comprador_canon":"","n":"Contratos","riesgo":"Riesgo"})
     fig_c.update_traces(marker_line_width=0)
     fig_c.update_layout(
         xaxis=dict(gridcolor="#F0F4F8", tickfont=dict(size=9)),
@@ -1338,8 +1658,10 @@ with tab_prov:
             fig_p.update_layout(
                 yaxis=dict(categoryorder="total ascending",tickfont=dict(size=9)),
                 xaxis=dict(gridcolor="#F0F4F8"), coloraxis_showscale=False,
-                paper_bgcolor="#ffffff", plot_bgcolor="#ffffff", font=dict(family="Inter",size=10),
-                title=dict(text="Top 15 proveedores",font=dict(size=12,color="#1A2E44",family="Inter"),x=0.01),
+                paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
+                font=dict(family="Inter",size=10),
+                title=dict(text="Top 15 proveedores",
+                           font=dict(size=12,color="#1A2E44",family="Inter"),x=0.01),
                 height=380, margin=dict(t=38,b=10))
             st.plotly_chart(fig_p, use_container_width=True)
     with c2:
@@ -1355,7 +1677,8 @@ with tab_prov:
                 fig_pv.update_layout(
                     yaxis=dict(categoryorder="total ascending",tickfont=dict(size=9)),
                     xaxis=dict(gridcolor="#F0F4F8"), coloraxis_showscale=False,
-                    paper_bgcolor="#ffffff", plot_bgcolor="#ffffff", font=dict(family="Inter",size=10),
+                    paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
+                    font=dict(family="Inter",size=10),
                     title=dict(text="Proveedores con más contratos vencidos",
                                font=dict(size=12,color="#1A2E44",family="Inter"),x=0.01),
                     height=380, margin=dict(t=38,b=10))
@@ -1370,14 +1693,16 @@ with tab_prov:
 with tab_gar_tab:
     c1,c2 = st.columns(2)
     with c1:
-        gc = df["tiene_garantia"].map({True:"Con garantía ✅",False:"Sin garantía ❌"}).value_counts()
+        gc = df["tiene_garantia"].map(
+            {True:"Con garantía ✅",False:"Sin garantía ❌"}).value_counts()
         fig_g = go.Figure(go.Pie(
             labels=gc.index, values=gc.values, hole=0.55,
             marker_colors=["#00A651","#D1DCE8"],
             marker_line=dict(color="#ffffff", width=2),
             textinfo="percent+value", textfont=dict(size=11,family="Inter")))
         fig_g.update_layout(
-            title=dict(text="Aplicación de garantías",font=dict(size=12,color="#1A2E44",family="Inter"),x=0.02),
+            title=dict(text="Aplicación de garantías",
+                       font=dict(size=12,color="#1A2E44",family="Inter"),x=0.02),
             paper_bgcolor="#ffffff", font=dict(family="Inter",size=10),
             height=250, margin=dict(t=38,b=10))
         st.plotly_chart(fig_g, use_container_width=True)
@@ -1392,16 +1717,20 @@ with tab_gar_tab:
             fig_gc2.update_layout(
                 yaxis=dict(categoryorder="total ascending",tickfont=dict(size=9)),
                 xaxis=dict(gridcolor="#F0F4F8"), coloraxis_showscale=False,
-                paper_bgcolor="#ffffff", plot_bgcolor="#ffffff", font=dict(family="Inter",size=10),
-                title=dict(text="Garantías por comprador",font=dict(size=12,color="#1A2E44",family="Inter"),x=0.01),
+                paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
+                font=dict(family="Inter",size=10),
+                title=dict(text="Garantías por comprador",
+                           font=dict(size=12,color="#1A2E44",family="Inter"),x=0.01),
                 height=270, margin=dict(t=38,b=10))
             st.plotly_chart(fig_gc2, use_container_width=True)
 
     df_grisk = df[df["tiene_garantia"] & df["riesgo"].isin(["ALTO 🔴","MEDIO 🟡"])].copy()
     if not df_grisk.empty:
         st.markdown("**⚠️ Contratos con garantía en riesgo:**")
-        cols_gr = [c for c in ["id","proveedor","comprador_canon","estado_ariba","dias_venc","riesgo","fuente"] if c in df_grisk]
-        st.dataframe(df_grisk[cols_gr].sort_values("dias_venc"), use_container_width=True, height=200)
+        cols_gr = [c for c in ["id","proveedor","comprador_canon","estado_ariba",
+                                "dias_venc","riesgo","fuente"] if c in df_grisk]
+        st.dataframe(df_grisk[cols_gr].sort_values("dias_venc"),
+                     use_container_width=True, height=200)
 
 
 # ══════════════════════════════════════════════
@@ -1410,13 +1739,15 @@ with tab_gar_tab:
 with tab_exp:
     cb,cn = st.columns([3,1])
     with cb:
-        busq = st.text_input("🔎 Buscar proveedor, ID o descripción", placeholder="Ej: LOGISTICA, CW2284016...")
+        busq = st.text_input("🔎 Buscar proveedor, ID o descripción",
+                             placeholder="Ej: LOGISTICA, CW2284016...")
     with cn:
         top_n = st.selectbox("Mostrar", [50,100,200,500,"Todos"], index=1)
 
-    cols_def = [c for c in ["id","fuente","proveedor","comprador_canon","tipo_comprador","estado_ariba",
-                              "fecha_inicio","fecha_termino","dias_venc","riesgo","tiene_garantia",
-                              "monto_total","rut","area","gerencia"] if c in df.columns]
+    cols_def = [c for c in [
+        "id","fuente","proveedor","comprador_canon","tipo_comprador","estado_ariba",
+        "fecha_inicio","fecha_termino","dias_venc","riesgo","tiene_garantia",
+        "monto_total","rut","area","gerencia"] if c in df.columns]
     cols_sel = st.multiselect("Columnas", df.columns.tolist(), default=cols_def)
 
     df_exp = df.copy()
@@ -1424,7 +1755,8 @@ with tab_exp:
         mask = pd.Series(False, index=df_exp.index)
         for col in ["proveedor","proveedor_cons","descripcion","id","nombre_proyecto"]:
             if col in df_exp.columns:
-                mask |= df_exp[col].astype(str).str.contains(busq.strip(), case=False, na=False)
+                mask |= df_exp[col].astype(str).str.contains(
+                    busq.strip(), case=False, na=False)
         df_exp = df_exp[mask]
 
     if "dias_venc" in df_exp.columns:
@@ -1446,33 +1778,43 @@ with tab_exp:
     else:
         st.dataframe(df_exp, use_container_width=True, height=500)
 
-    st.caption(f"Mostrando {len(df_exp):,} de {len(df):,} contratos · {len(df_universo):,} total en universo unificado")
+    st.caption(
+        f"Mostrando {len(df_exp):,} de {len(df):,} contratos "
+        f"· {len(df_universo):,} total en universo unificado")
 
 
 # ──────────────────────────────────────────────────────────────
 # EXPORTACIÓN GENERAL
 # ──────────────────────────────────────────────────────────────
-st.markdown('<div class="sec">📥 Exportar datos del universo unificado</div>', unsafe_allow_html=True)
+st.markdown('<div class="sec">📥 Exportar datos del universo unificado</div>',
+            unsafe_allow_html=True)
 ts = datetime.now().strftime("%Y%m%d_%H%M")
 ex1,ex2,ex3,ex4,ex5 = st.columns(5)
 with ex1:
-    st.download_button("💾 Vista actual · CSV", df.to_csv(index=False).encode("utf-8-sig"),
+    st.download_button("💾 Vista actual · CSV",
+                       df.to_csv(index=False).encode("utf-8-sig"),
                        f"contratos_{ts}.csv", mime="text/csv")
 with ex2:
     crit = df[df["riesgo"].isin(["ALTO 🔴","MEDIO 🟡"])]
-    st.download_button("🔴 Solo en riesgo", crit.to_csv(index=False).encode("utf-8-sig"),
+    st.download_button("🔴 Solo en riesgo",
+                       crit.to_csv(index=False).encode("utf-8-sig"),
                        f"contratos_riesgo_{ts}.csv", mime="text/csv")
 with ex3:
-    urg = df[df["dias_venc"].between(0,60)] if "dias_venc" in df.columns else pd.DataFrame()
-    st.download_button("⚠️ Vencen en 60 días", urg.to_csv(index=False).encode("utf-8-sig"),
+    urg = (df[df["dias_venc"].between(0,60)] if "dias_venc" in df.columns
+           else pd.DataFrame())
+    st.download_button("⚠️ Vencen en 60 días",
+                       urg.to_csv(index=False).encode("utf-8-sig"),
                        f"contratos_urgentes_{ts}.csv", mime="text/csv")
 with ex4:
     gdf = df[df["tiene_garantia"]]
-    st.download_button("🔒 Con garantía", gdf.to_csv(index=False).encode("utf-8-sig"),
+    st.download_button("🔒 Con garantía",
+                       gdf.to_csv(index=False).encode("utf-8-sig"),
                        f"contratos_garantia_{ts}.csv", mime="text/csv")
 with ex5:
-    sc_exp = df[df["fuente"] == "Solo Consolidado"] if "fuente" in df.columns else pd.DataFrame()
-    st.download_button("📂 Solo Drive", sc_exp.to_csv(index=False).encode("utf-8-sig"),
+    sc_exp = (df[df["fuente"] == "Solo Consolidado"] if "fuente" in df.columns
+              else pd.DataFrame())
+    st.download_button("📂 Solo Drive",
+                       sc_exp.to_csv(index=False).encode("utf-8-sig"),
                        f"contratos_solo_drive_{ts}.csv", mime="text/csv")
 
 
@@ -1483,35 +1825,45 @@ with st.expander("🔧 Diagnóstico técnico"):
     d1,d2,d3 = st.columns(3)
     with d1:
         fuente_counts = df_universo["fuente"].value_counts().to_dict()
-        st.json({"Total Pivot (activos)":len(df_piv),
-                 "Total universo unificado":len(df_universo),
-                 "En ambas fuentes": fuente_counts.get("Ambos",0),
-                 "Solo en Ariba":    fuente_counts.get("Ariba",0),
-                 "Solo en Drive":    fuente_counts.get("Solo Consolidado",0),
-                 "Con garantía":int(df_universo["tiene_garantia"].sum()),
-                 "Indefinidos":int(df_universo["es_indefinido"].sum()),
-                 "Compradores oficiales":int(df_universo["es_oficial"].sum())})
+        st.json({"Total Pivot (activos)":       len(df_piv),
+                 "Total universo unificado":     len(df_universo),
+                 "En ambas fuentes":             fuente_counts.get("Ambos",0),
+                 "Solo en Ariba":                fuente_counts.get("Ariba",0),
+                 "Solo en Drive":                fuente_counts.get("Solo Consolidado",0),
+                 "Con garantía":                 int(df_universo["tiene_garantia"].sum()),
+                 "Indefinidos":                  int(df_universo["es_indefinido"].sum()),
+                 "Compradores oficiales":        int(df_universo["es_oficial"].sum())})
     with d2:
-        st.json({"Contratos en vista":len(df),
-                 "Riesgo ALTO":int((df["riesgo"]=="ALTO 🔴").sum()),
-                 "Riesgo MEDIO":int((df["riesgo"]=="MEDIO 🟡").sum()),
-                 "Consolidado cargado":df_cons_raw is not None,
-                 "Actualizado":datetime.now().strftime("%d/%m/%Y %H:%M")})
+        st.json({"Contratos en vista":    len(df),
+                 "Riesgo ALTO":           int((df["riesgo"]=="ALTO 🔴").sum()),
+                 "Riesgo MEDIO":          int((df["riesgo"]=="MEDIO 🟡").sum()),
+                 "Consolidado cargado":   df_cons_raw is not None,
+                 "Actualizado":           datetime.now().strftime("%d/%m/%Y %H:%M")})
     with d3:
-        # ── Info de persistencia ──
         meta_diag = cargar_metadata()
+        od_diag   = _leer_od_config()
         st.json({
-            "Persistencia activa": os.path.exists(PERSIST_PIVOT),
-            "Directorio": PERSIST_DIR,
-            "Pivot en servidor": meta_diag.get("pivot", {}).get("filename","—"),
-            "Pivot subido": meta_diag.get("pivot", {}).get("uploaded_at","—"),
-            "Pivot MD5": meta_diag.get("pivot", {}).get("hash_md5","—")[:12] + "…" if meta_diag.get("pivot",{}).get("hash_md5") else "—",
-            "Consolidado en servidor": meta_diag.get("consolidado", {}).get("filename","—"),
+            "Persistencia activa":        os.path.exists(PERSIST_PIVOT),
+            "Directorio":                 PERSIST_DIR,
+            "Pivot en servidor":          meta_diag.get("pivot",{}).get("filename","—"),
+            "Pivot subido":               meta_diag.get("pivot",{}).get("uploaded_at","—"),
+            "Pivot MD5":                  (meta_diag.get("pivot",{}).get("hash_md5","—")[:12]+"…"
+                                           if meta_diag.get("pivot",{}).get("hash_md5") else "—"),
+            "Consolidado en servidor":    meta_diag.get("consolidado",{}).get("filename","—"),
+            "OneDrive URL configurada":   bool(od_diag.get("url","")),
+            "Último sync OneDrive":       od_diag.get("ultimo_sync_ok","—"),
         })
 
 
-# ── Footer Softys ──────────────────────────────────────────────
-persist_label = "💾 Datos persistentes en servidor" if os.path.exists(PERSIST_PIVOT) else "⚡ Sin persistencia activa"
+# ── Footer ────────────────────────────────────────────────────
+od_footer = od_cfg.get("url","")
+if os.path.exists(PERSIST_PIVOT) and od_footer:
+    persist_label = "💾 Persistente · 🔗 OneDrive vinculado"
+elif os.path.exists(PERSIST_PIVOT):
+    persist_label = "💾 Datos persistentes en servidor"
+else:
+    persist_label = "⚡ Sin persistencia activa"
+
 st.markdown(f"""
 <div style="margin-top:32px;padding:14px 20px;
      background:linear-gradient(135deg,#003F7A,#005CA9);
